@@ -16,7 +16,7 @@ import {
   DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT, CHECK_CONTRACT_API_OUT, HOST_DIAGNOSTICS_OUT,
 } from "./outputSchemas.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 // Every tool returns the human-readable JSON text AND validated structuredContent. The object we
 // return IS the structured payload (these tools never throw their own error result — handler
@@ -213,6 +213,16 @@ async function smoke() {
   checks.push(["checker flags JSON.stringify of an unordered object", jstr.findings.some((f) => f.rule === "json-stringify-unordered")]);
   const sorted = checkDeterminism("Object.keys(o).sort().forEach(f);\nJSON.stringify([1, 2, 3]);\nconst n = ctx.lclSeqNo;");
   checks.push(["checker suppresses sorted forEach + array stringify (no false-positive)", sorted.findings.length === 0]);
+  // v0.5.0 coverage: locale/timezone, floating-point, member-expression iteration (each must FIRE).
+  const loc = checkDeterminism("const s = n.toLocaleString();\narr.sort((a, b) => a.localeCompare(b));");
+  checks.push(["checker flags locale/timezone (toLocaleString + localeCompare)", loc.findings.filter((f) => f.rule === "locale-timezone").length >= 2]);
+  const flt = checkDeterminism("let t = 0;\nt += x * 0.1;\nconst y = parseFloat(s);");
+  checks.push(["checker flags floating-point (float literal + parseFloat)", flt.findings.filter((f) => f.rule === "floating-point").length >= 2]);
+  const mem = checkDeterminism("for (const x of this.m) {}");
+  checks.push(["checker flags for..of over a member expression (this.m)", mem.findings.some((f) => f.rule === "iteration-order-member")]);
+  // v0.5.0 honesty: integer drops math + code-point sort + user.inputs iteration stay CLEAN (no float/locale/member false-positive).
+  const clean = checkDeterminism("for (const inp of user.inputs) { const v = Math.floor((total * elapsed) / dur); arr.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); }");
+  checks.push(["checker stays clean on integer math + code-point sort + user.inputs (no new false-positive)", clean.findings.length === 0]);
   checks.push(["lease math", estimateLease({ evrPerMoment: 2, moments: 24, nodes: 3 }).totalEVR === 144]);
   checks.push(["error explainer maps consensus", explainError("ledger not created, nodes disagree").matched === true]);
   // v0.4.0: the 3 new templates are determinism-clean (covered by the listTemplates loop above)
@@ -238,6 +248,12 @@ async function smoke() {
   const noDiag = await hostDiagnostics({});
   checks.push(["host_diagnostics is honest with no input (found:false, no fabricated host)",
     noDiag.found === false && !!noDiag.note]);
+  // v0.5.0: numeric coercion is sound + no-fabrication. A string-typed numeric supplied as a host
+  // object reaches diagnoseHost AS-IS (mapHost only runs on the fetch path), so here we assert the
+  // diagnoseHost contract on real numbers; the string-coercion path is covered in hostDiagnostics.test.ts.
+  const coerced = await hostDiagnostics({ host: { address: "rCoerce", hostReputation: 10, maxInstances: 3, activeInstances: 3 } });
+  checks.push(["host_diagnostics red-flags derive from numeric reputation/slots",
+    typeof coerced.reputation === "number" && coerced.redFlags.some((f) => /reputation/.test(f))]);
   const fail = checks.filter(([, ok]) => !ok);
   for (const [n, ok] of checks) console.log(`${ok ? "ok  " : "FAIL"} ${n}`);
   console.log(`\n${checks.length - fail.length}/${checks.length} passed`);

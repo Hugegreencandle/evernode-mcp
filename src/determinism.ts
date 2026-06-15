@@ -127,21 +127,34 @@ function jsonStringifyIsSafe(line: string, m: RegExpExecArray): boolean {
   return false;
 }
 
-// ---- cross-line alias pass: Map/Set reached through a variable --------------------------------
+// ---- cross-line alias pass: Map/Set reached through a variable OR a member --------------------
 // The per-line rules catch Map/Set named ON the iteration line (`for (..of new Map())`). The audit
 // flagged the alias gap: `const m = new Map(); ... for (const x of m) {}`. We do a tiny pre-pass to
-// learn which identifiers were assigned a `new Map(`/`new Set(`, then flag iteration/materialization
-// over those identifiers on later lines. This is intentionally conservative-toward-flagging: we
+// learn which identifiers/members were assigned a `new Map(`/`new Set(`, then flag iteration/
+// materialization over those on later lines. This is intentionally conservative-toward-flagging: we
 // don't try to prove the alias is sorted (a var can't be `.sort()`-ed in place), so any such use is
 // reported (low). Reassignment isn't tracked (a name seen as a Map alias STAYS flagged) — that can
 // over-flag, which is the acceptable direction.
+//
+// TWO alias shapes are learned, both SOUND (evidence the binding holds a Map/Set):
+//   1. a simple identifier:  `const m = new Map()`   -> tracked id "m"
+//   2. a member assignment:  `this.m = new Set()`, `state.m = new Map()`, `obj.m = new Map()`
+//      -> tracked member "this.m" / "state.m" / "obj.m". This closes the audit-flagged member case
+//      (`for (const x of this.m) {}`) without unsound name-guessing: we only flag a member we SAW
+//      assigned a Map/Set. (Bare members with no such evidence are handled by the per-line rule
+//      below with a known-array allowlist, never by this evidence-based pass.)
 function collectMapSetAliases(strippedLines: string[]): Set<string> {
   const aliases = new Set<string>();
-  const decl = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+(?:Map|Set)\b/g;
+  // identifier:  const|let|var X = new Map/Set
+  const declId = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+(?:Map|Set)\b/g;
+  // member:      this.X = / state.X = / obj.X = new Map/Set   (and chained: a.b.X = new Map())
+  const declMember = /\b((?:this|[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)+)\s*=\s*new\s+(?:Map|Set)\b/g;
   for (const line of strippedLines) {
     let m: RegExpExecArray | null;
-    decl.lastIndex = 0;
-    while ((m = decl.exec(line))) aliases.add(m[1]);
+    declId.lastIndex = 0;
+    while ((m = declId.exec(line))) aliases.add(m[1]);
+    declMember.lastIndex = 0;
+    while ((m = declMember.exec(line))) aliases.add(m[1]);
   }
   return aliases;
 }
@@ -149,15 +162,25 @@ function collectMapSetAliases(strippedLines: string[]): Set<string> {
 // Given the alias set, find an order-sensitive use of any alias on a line. Returns the column
 // (1-based) of the match, or 0 if none. We match: for..of over the alias, spread `[...alias]`,
 // `Array.from(alias`, `alias.forEach(`, and `alias.entries()/keys()/values()` (the iterators).
+// Works for both identifier aliases ("m") and member aliases ("this.m"/"state.m").
 function aliasIterColumn(line: string, aliases: Set<string>): number {
   for (const a of aliases) {
     const id = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // A member alias ("this.m") must NOT be preceded by another `.` (so `x.this.m` doesn't match a
+    // "this.m" alias); a plain `\b` is fine for identifiers. Use a negative look-behind-ish guard via
+    // a preceding non-`.` boundary baked into each pattern's leading context.
+    const lead = a.includes(".") ? "(?<![.\\w$])" : "\\b";
+    // The spread/Array.from contexts already begin with `...`/`(`, so the alias there is unambiguous
+    // — they don't need (and must NOT use) the dot look-behind (the `...` ends in a `.`, which would
+    // wrongly block a member alias like `[...state.s]`). The for..of/forEach/iterator contexts do
+    // use `lead` to avoid matching a member alias as the tail of a longer member chain (`x.this.m`).
     const pats: RegExp[] = [
-      new RegExp(`\\bfor\\s*\\(\\s*(?:const|let|var)\\s+(?:\\[[^\\]]*\\]|[\\w$]+)\\s+of\\s+${id}\\b`),
+      new RegExp(`\\bfor\\s+await\\s*\\(\\s*(?:const|let|var)\\s+(?:\\[[^\\]]*\\]|[\\w$]+)\\s+of\\s+${lead}${id}\\b`),
+      new RegExp(`\\bfor\\s*\\(\\s*(?:const|let|var)\\s+(?:\\[[^\\]]*\\]|[\\w$]+)\\s+of\\s+${lead}${id}\\b`),
       new RegExp(`\\[\\s*\\.\\.\\.\\s*${id}\\b`),
       new RegExp(`\\bArray\\.from\\s*\\(\\s*${id}\\b`),
-      new RegExp(`\\b${id}\\.forEach\\s*\\(`),
-      new RegExp(`\\b${id}\\.(?:entries|keys|values)\\s*\\(`),
+      new RegExp(`${lead}${id}\\.forEach\\s*\\(`),
+      new RegExp(`${lead}${id}\\.(?:entries|keys|values)\\s*\\(`),
     ];
     for (const re of pats) {
       const m = re.exec(line);
@@ -233,6 +256,40 @@ const RULES: Rule[] = [
     // freshly-built object literal on the same line (its key order is lexically fixed), or a call
     // that already passes a replacer array as the 2nd arg.
     suppress: (line, m) => jsonStringifyIsSafe(line, m) },
+  // Locale / ICU / timezone formatting + collation. The result depends on the host's installed
+  // locale + ICU data + (for time) timezone — all of which vary node-to-node. A consensus breaker
+  // any time the formatted/compared value feeds state or output (and the scanner can't tell that it
+  // doesn't, so it flags). Classic trap: sorting strings with localeCompare to "order a leaderboard".
+  { id: "locale-timezone",
+    re: /\.toLocale(?:String|DateString|TimeString)\s*\(|\.localeCompare\s*\(|\bIntl\./,
+    severity: "medium",
+    why: "Locale/ICU/timezone-dependent: toLocaleString/toLocaleDateString/toLocaleTimeString, localeCompare, and Intl.* use the HOST's locale + ICU collation/format data (and the host timezone) — which differ across cluster nodes, so the produced string or sort order diverges and consensus breaks.",
+    fix: "Use locale-INDEPENDENT formatting: build strings from raw fields / fixed templates, and SORT with a code-point comparison (`a < b ? -1 : a > b ? 1 : 0`), never `localeCompare`. For time, format from the consensus ledger seq (ctx.lclSeqNo), never a locale/timezone-aware Date formatter." },
+  // Floating-point literals / parseFloat feeding contract math. Non-integer float arithmetic can
+  // round / produce NaN / -0 differently across JS engines (and accumulate divergently). SOUND +
+  // low-noise because the templates deliberately use INTEGER drops only — a non-integer literal in a
+  // contract is a real smell. We flag `parseFloat(` and a bare non-integer decimal literal (e.g.
+  // `0.1`, `* 0.1`), guarding against dotted version-like tokens (`1.2.3`) and member access. We
+  // also flag a NEGATIVE-exponent scientific literal (`1.5e-3`, `1e-3`, `5E-2`) — always a non-integer
+  // fraction; a positive-exponent literal (`1.5e3` = 1500) stays unflagged since it's integer-valued.
+  { id: "floating-point",
+    re: /\bparseFloat\s*\(|(?<![\w$.])\d+\.\d+(?![\w.])|(?<![\w$.])\d+(?:\.\d+)?[eE]-\d+\b/,
+    severity: "low",
+    why: "Floating-point math is an engine-level non-determinism risk: non-integer float literals (or parseFloat) can round, produce NaN/-0, or accumulate differently across JS engines/versions running on different hosts — so a value derived from them can diverge across nodes.",
+    fix: "Use INTEGER math only for consensused amounts (e.g. work in drops, not XAH): scale to integers, do `Math.floor(a * n / d)` style division, and avoid non-integer float literals / parseFloat in any value that feeds state or output." },
+  // for..of over a BARE member expression (`this.m`, `state.m`, `obj.m`) whose binding we have NO
+  // Map/Set evidence for (the alias pass handles the evidenced case). Order-unprovable: it could be
+  // a Map/Set (insertion order, divergence risk) — flag-biased, so flag it (low). Suppress members
+  // that are KNOWN deterministic arrays in the HotPocket contract API (e.g. `user.inputs`), and
+  // suppress CALL expressions (`x.list()`) which this regex already excludes by requiring no `(`.
+  { id: "iteration-order-member",
+    re: /\bfor\s*\(\s*(?:const|let|var)\s+(?:\[[^\]]*\]|[\w$]+)\s+of\s+((?:this|[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)+)\s*\)/,
+    severity: "low",
+    why: "Iterating a member expression (e.g. `this.m` / `state.m`) with for..of: if the member holds a Map/Set, iteration follows INSERTION order, which is deterministic only if every node inserted in the same consensused order. The scanner can't prove the member isn't an unordered collection, so (flag-biased) it reports it.",
+    fix: "If the member is a Map/Set, materialize + sort before iterating: `for (const k of [...this.m.keys()].sort())`. If it is genuinely an ordered array (e.g. a HotPocket `user.inputs` list), this is a safe false-positive — justify it.",
+    // Suppress known-deterministic HotPocket array members so the templates stay clean and we don't
+    // flood honest array iteration. `user.inputs` is an array delivered in a fixed order.
+    suppress: (_line, m) => /(?:^|\.)(?:inputs|outputs)$/.test(m[1]) },
   { id: "filesystem", re: /\bfs\.(readFile|readFileSync|readdir|readdirSync|writeFile|writeFileSync|stat|statSync)\s*\(/,
     severity: "medium",
     why: "Reading/writing host files outside HotPocket's consensused state dir introduces per-node differences.",

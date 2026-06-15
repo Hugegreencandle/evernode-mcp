@@ -5,6 +5,66 @@ All notable changes to evernode-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-15
+
+Enterprise hardening pass: closes the residual gaps a prior audit had documented as "out of scope"
+by actually CLOSING them — a sound numeric-coercion fix in `host_diagnostics`, and three new
+`check_determinism` rules (locale/timezone, floating-point, member-expression iteration) plus a
+member-expression extension to the cross-line Map/Set alias pass. evernode-mcp stays **advisory**
+(no key custody, no EVR spend, no lease acquisition, no signing). `check_determinism` is still a
+HEURISTIC linter (guidance, never a proof — the checker remains deliberately flag-biased: over-flag
+is acceptable, a silent miss is not), `host_diagnostics` still returns **real OnLedger data only**
+(now with sound coercion — garbage is omitted, never a fabricated default), and settlement safety
+stays delegated to the trifecta (xahc · xahau-mcp · xahc-prover).
+
+### Fixed
+- **`host_diagnostics` numeric type-passthrough (`src/advisor.ts` `mapHost`).** OnLedger can return a
+  numeric field as a STRING (e.g. `reputation: "252"`). The old `as number` cast leaked the string
+  through the `number` output schema (runtime `structuredContent` validation could fail) AND bypassed
+  the numeric red-flag comparisons (a string is never `< 50`). Each numeric field is now coerced with a
+  sound helper — `Number(x)` accepted **only** when `Number.isFinite`; otherwise the field is **OMITTED**
+  (NO FABRICATION — never a manufactured `0`/default, never a bad type). Empty/whitespace strings (which
+  `Number("")` would turn into `0`), non-finite values, booleans, and objects are all rejected to a
+  clean omit. Red-flags now derive only from successfully-coerced numbers. String fields (`version`,
+  `countryCode`, `hostingType`) likewise omit a non-string rather than stringifying it.
+
+### Added — `check_determinism` coverage (each with a `why` + `fix`)
+- **`locale-timezone` rule (MEDIUM).** Flags `toLocaleString` / `toLocaleDateString` /
+  `toLocaleTimeString`, `localeCompare`, and `Intl.*` — host locale/ICU collation+format data (and
+  timezone) differ across nodes, so the produced string or sort order diverges and consensus breaks.
+- **`floating-point` rule (LOW).** Flags `parseFloat(` and a bare non-integer float **literal** (e.g.
+  `0.1`) feeding contract math (engine-level rounding / NaN / `-0` divergence). Sound + low-noise:
+  integer literals, integer division (`Math.floor(a*n/d)`), and dotted version-like / member tokens are
+  NOT flagged. (Bare `a / b` of unknown-typed vars stays out of scope — too noisy to flag soundly.)
+- **`iteration-order-member` rule (LOW).** Flags `for (const x of this.m / state.m / obj.m)` — an
+  order-unprovable member-expression iteration (could be a Map/Set). Known deterministic array members
+  (`user.inputs`/`outputs`) and **call** expressions (`ctx.users.list()`) are suppressed.
+- **Cross-line alias pass extended to MEMBER aliases.** `collectMapSetAliases` now also learns
+  `this.m = new Map()` / `state.m = new Set()` / `obj.m = new Map()` and flags iteration / spread /
+  `forEach` / `Array.from` / `.entries()/.keys()/.values()` over those members (evidence-based, sound —
+  not name-guessing). The same-line `const x = new Map(); for..of x` case is covered too.
+
+### Changed
+- **`game_backend` template made determinism-clean under the new locale rule.** Its leaderboard
+  tiebreaker switched from `a.localeCompare(b)` (locale/ICU-dependent — a real consensus risk) to a
+  **code-point** comparison (`a < b ? -1 : a > b ? 1 : 0`). This is a template *correctness fix*, not a
+  rule weakening — all templates stay determinism-clean (0 findings) under the new rules.
+- **README "Now covered" / "Still out of scope" sections rewritten** to reflect the shrunk out-of-scope
+  list (locale, floating-point literals, and member-expression iteration moved from out-of-scope to
+  covered; only bare untyped float division + deeper multi-hop data-flow remain out of scope, honestly).
+
+### Tests
+- `tests/determinism.test.ts`: +16 tests — the three new rules (fire + severity + never-HIGH +
+  suppression of the deterministic fixes), the member-alias extension, and the previously-"documented
+  out-of-scope" cases that are now covered moved into "new coverage" (the genuinely-still-missed cases
+  re-pinned). Existing regression-floor + suppression tests all still pass (no regression).
+- `tests/hostDiagnostics.test.ts`: +11 tests for the coercion fix — string-numeric coerced, garbage /
+  empty-string / non-finite / boolean / object → OMITTED (no fabrication), already-number passes,
+  missing stays missing, non-string version/country omitted, and string `flagged` `"0"`/`"1"` truthiness.
+- Smoke (`--smoke`): +5 checks (locale, floating-point, member-expression fire; integer-math/code-point/
+  `user.inputs` stay clean; coercion red-flags derive from numbers). Now 30/30; all 10 templates stay
+  HIGH-clean. Suite: 275 → 302 tests, all green.
+
 ## [0.4.0] - 2026-06-15
 
 Features pass: 3 new dApp templates (the harder consensus patterns), a contract-API checker, and a

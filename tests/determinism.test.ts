@@ -270,10 +270,6 @@ describe("determinism checker", () => {
       const { findings } = checkDeterminism("const m = new Map();\nconst n = m;\nfor (const x of n) {}");
       expect(findings.some((f) => f.rule.startsWith("iteration-order"))).toBe(false);
     });
-    it("misses a Map iterated via property access (this.m / state.m)", () => {
-      expect(checkDeterminism("for (const x of this.m) {}").findings.length).toBe(0);
-      expect(checkDeterminism("for (const x of state.m) {}").findings.length).toBe(0);
-    });
     it("misses a Map passed in as a function parameter", () => {
       const { findings } = checkDeterminism("function f(m) { for (const x of m) {} }");
       expect(findings.length).toBe(0);
@@ -305,18 +301,111 @@ describe("determinism checker", () => {
     });
   });
 
-  describe("documented out-of-scope — locale & floating-point (known-miss, see README)", () => {
-    it("misses toLocaleString / Intl.NumberFormat (locale-dependent formatting)", () => {
-      expect(checkDeterminism("const s = n.toLocaleString();").findings.length).toBe(0);
-      expect(checkDeterminism("const s = new Intl.NumberFormat().format(n);").findings.length).toBe(0);
+  // ---------------------------------------------------------------------------
+  // NEW COVERAGE (v0.5.0): locale/timezone + floating-point + member-expression
+  // iteration are no longer out of scope — each must now FIRE. (Moved here from the
+  // old "documented out-of-scope" block when the rules were added; the README
+  // out-of-scope list was shrunk in the same change.)
+  // ---------------------------------------------------------------------------
+  describe("new coverage — locale / timezone (medium)", () => {
+    it("flags toLocaleString as medium", () => {
+      const f = checkDeterminism("const s = n.toLocaleString();").findings.find((x) => x.rule === "locale-timezone");
+      expect(f?.severity).toBe("medium");
     });
-    it("misses locale-sensitive sort (a.localeCompare(b))", () => {
-      const { findings } = checkDeterminism("arr.sort((a, b) => a.localeCompare(b));");
-      expect(findings.length).toBe(0);
+    it("flags toLocaleDateString / toLocaleTimeString", () => {
+      expect(checkDeterminism("d.toLocaleDateString();").findings.some((f) => f.rule === "locale-timezone")).toBe(true);
+      expect(checkDeterminism("d.toLocaleTimeString();").findings.some((f) => f.rule === "locale-timezone")).toBe(true);
     });
-    it("misses floating-point accumulation", () => {
-      const { findings } = checkDeterminism("let t = 0; for (const x of xs) t += x * 0.1;");
-      expect(findings.length).toBe(0);
+    it("flags Intl.* usage", () => {
+      expect(checkDeterminism("const s = new Intl.NumberFormat().format(n);").findings.some((f) => f.rule === "locale-timezone")).toBe(true);
+      expect(checkDeterminism("const c = new Intl.Collator();").findings.some((f) => f.rule === "locale-timezone")).toBe(true);
+    });
+    it("flags locale-sensitive sort (a.localeCompare(b))", () => {
+      expect(checkDeterminism("arr.sort((a, b) => a.localeCompare(b));").findings.some((f) => f.rule === "locale-timezone")).toBe(true);
+    });
+    it("locale finding is never HIGH (keeps templates' HIGH-only smoke clean)", () => {
+      expect(checkDeterminism("n.toLocaleString();").findings.filter((f) => f.rule === "locale-timezone" && f.severity === "high").length).toBe(0);
+    });
+    it("does NOT flag a code-point comparison (the deterministic fix)", () => {
+      const { findings } = checkDeterminism("arr.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));");
+      expect(findings.some((f) => f.rule === "locale-timezone")).toBe(false);
+    });
+  });
+
+  describe("new coverage — floating-point (low)", () => {
+    it("flags a non-integer float literal feeding accumulation", () => {
+      const f = checkDeterminism("let t = 0; for (const x of xs) t += x * 0.1;").findings.find((x) => x.rule === "floating-point");
+      expect(f?.severity).toBe("low");
+    });
+    it("flags parseFloat", () => {
+      expect(checkDeterminism("const x = parseFloat(s);").findings.some((f) => f.rule === "floating-point")).toBe(true);
+    });
+    it("does NOT flag integer division floor math (the deterministic drops pattern)", () => {
+      expect(checkDeterminism("const v = Math.floor((total * elapsed) / dur);").findings.some((f) => f.rule === "floating-point")).toBe(false);
+    });
+    it("does NOT flag integer literals", () => {
+      expect(checkDeterminism("const n = 100; const z = 2592000;").findings.some((f) => f.rule === "floating-point")).toBe(false);
+    });
+    it("does NOT flag a dotted version-like / member token (1.2.3, x.0)", () => {
+      expect(checkDeterminism("const v = obj.prop;").findings.some((f) => f.rule === "floating-point")).toBe(false);
+      expect(checkDeterminism("arr[0].x = 1;").findings.some((f) => f.rule === "floating-point")).toBe(false);
+    });
+    it("floating-point finding is never HIGH (keeps templates' HIGH-only smoke clean)", () => {
+      expect(checkDeterminism("const r = 0.5;").findings.filter((f) => f.rule === "floating-point" && f.severity === "high").length).toBe(0);
+    });
+    // Adversarial verify 2026-06-15: a NEGATIVE-exponent scientific literal is a non-integer float
+    // literal (in the covered "float literals" class) — it must NOT be silently missed. Was a gap:
+    // the decimal-literal regex's (?![\w.]) lookahead saw the `e` and suppressed `1.5e-3`.
+    it("flags a negative-exponent scientific float literal (1.5e-3 / 1e-3 / 5E-2)", () => {
+      for (const src of ["const r = 1.5e-3;", "const r = 1e-3;", "let t=0; for (const x of xs) t += x * 5E-2;"]) {
+        expect(checkDeterminism(src).findings.some((f) => f.rule === "floating-point"), src).toBe(true);
+      }
+    });
+    it("does NOT flag a positive-exponent scientific literal (1.5e3 = 1500, integer-valued)", () => {
+      expect(checkDeterminism("const drops = 1.5e3;").findings.some((f) => f.rule === "floating-point")).toBe(false);
+      expect(checkDeterminism("const big = 2.5E10;").findings.some((f) => f.rule === "floating-point")).toBe(false);
+    });
+  });
+
+  describe("new coverage — member-expression for..of (low)", () => {
+    it("flags for..of over this.m / state.m / obj.m (order-unprovable member)", () => {
+      for (const src of ["for (const x of this.m) {}", "for (const x of state.m) {}", "for (const x of obj.m) {}"]) {
+        const f = checkDeterminism(src).findings.find((x) => x.rule === "iteration-order-member");
+        expect(f?.severity, src).toBe("low");
+      }
+    });
+    it("does NOT flag for..of over a known-array member (user.inputs)", () => {
+      expect(checkDeterminism("for (const inp of user.inputs) {}").findings.some((f) => f.rule.startsWith("iteration-order"))).toBe(false);
+    });
+    it("does NOT flag for..of over a CALL expression (ctx.users.list())", () => {
+      expect(checkDeterminism("for (const u of ctx.users.list()) {}").findings.some((f) => f.rule.startsWith("iteration-order"))).toBe(false);
+    });
+    it("member finding is never HIGH (keeps templates' HIGH-only smoke clean)", () => {
+      expect(checkDeterminism("for (const x of this.m) {}").findings.filter((f) => f.rule === "iteration-order-member" && f.severity === "high").length).toBe(0);
+    });
+  });
+
+  describe("new coverage — member-expression Map/Set alias (this.m = new Map())", () => {
+    it("flags iteration of an EVIDENCED member alias (this.m = new Map(); for..of this.m)", () => {
+      const { findings } = checkDeterminism("this.m = new Map();\nfor (const x of this.m) {}");
+      expect(findings.some((f) => f.rule.startsWith("iteration-order"))).toBe(true);
+    });
+    it("flags spread of an evidenced member alias ([...state.s])", () => {
+      const { findings } = checkDeterminism("state.s = new Set();\nconst a = [...state.s];");
+      expect(findings.some((f) => f.rule === "iteration-order-alias")).toBe(true);
+    });
+    it("flags forEach / Array.from / .entries() of an evidenced member alias", () => {
+      expect(checkDeterminism("this.m = new Map();\nthis.m.forEach(f);").findings.some((f) => f.rule === "iteration-order-alias")).toBe(true);
+      expect(checkDeterminism("this.m = new Map();\nconst a = Array.from(this.m);").findings.some((f) => f.rule === "iteration-order-alias")).toBe(true);
+      expect(checkDeterminism("this.m = new Map();\nconst e = this.m.entries();").findings.some((f) => f.rule === "iteration-order-alias")).toBe(true);
+    });
+  });
+
+  describe("still out of scope — bare float math & untyped division (known-miss, see README)", () => {
+    it("misses bare division of two variables (could be floats, but no literal/parseFloat signal)", () => {
+      // we only flag float LITERALS / parseFloat; `a / b` of unknown-typed vars is too noisy to flag soundly
+      const { findings } = checkDeterminism("const r = a / b;");
+      expect(findings.some((f) => f.rule === "floating-point")).toBe(false);
     });
   });
 

@@ -174,6 +174,104 @@ describe("hostDiagnostics (live path, mocked fetch)", () => {
     expect(d.registration?.countryCode).toBeUndefined();
   });
 
+  // ---------------------------------------------------------------------------
+  // NUMERIC TYPE-PASSTHROUGH COERCION (v0.5.0). OnLedger sometimes returns numeric
+  // fields as STRINGS (`reputation: "252"`). mapHost (exercised via the live fetch
+  // path) must coerce each numeric field with a SOUND helper: Number(x) guarded by
+  // Number.isFinite — coerce a string-numeric, OMIT garbage (never fabricate 0),
+  // pass an already-number through, and keep a missing field missing. The output
+  // then satisfies the `number` schema AND the red-flags derive only from real numbers.
+  // ---------------------------------------------------------------------------
+  describe("numeric coercion (string-typed numerics from OnLedger)", () => {
+    it("coerces a STRING-numeric reputation to a real number (and the red-flag fires off it)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rStrNum", hostReputation: "10", maxInstances: "3", activeInstances: "3" }));
+      const d = await hostDiagnostics({ address: "rStrNum" });
+      expect(d.reputation).toBe(10);                 // number, not "10"
+      expect(typeof d.reputation).toBe("number");
+      expect(d.slots).toEqual({ active: 3, total: 3, available: 0 });
+      // low-reputation + full-capacity red-flags must fire — they compare coerced NUMBERS
+      expect(d.redFlags.some((f) => /reputation/.test(f))).toBe(true);
+      expect(d.redFlags.some((f) => /capacity/.test(f))).toBe(true);
+    });
+
+    it("string-numeric lease/specs coerce to numbers (schema-safe)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rLease", leaseAmount: "0.5", leaseDrops: "200000", ramMb: "4096", diskMb: "51200" }));
+      const d = await hostDiagnostics({ address: "rLease" });
+      expect(d.lease).toEqual({ evrPerMoment: 0.5, leaseDrops: 200000 });
+      expect(d.specs).toEqual({ ramMb: 4096, diskMb: 51200 });
+    });
+
+    it("NO FABRICATION: a garbage numeric ('notanum') OMITS the field — not 0, not an error", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rGarbage", hostReputation: "notanum", maxInstances: "abc", ramMb: "??" }));
+      const d = await hostDiagnostics({ address: "rGarbage" });
+      expect(d.found).toBe(true);                     // still a valid found host (address present)
+      expect(d.reputation).toBeUndefined();           // omitted, NOT 0
+      expect(d.specs).toBeUndefined();
+      expect(d.slots).toBeUndefined();
+      // a bad reputation must NOT manufacture a "low reputation" red-flag (the number never existed)
+      expect(d.redFlags.some((f) => /low reputation/.test(f))).toBe(false);
+      expect(d.redFlags.some((f) => /zero reputation/.test(f))).toBe(false);
+    });
+
+    it("NO FABRICATION: an empty-string numeric OMITS the field (Number('') would be 0)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rEmptyNum", hostReputation: "", maxInstances: "  " }));
+      const d = await hostDiagnostics({ address: "rEmptyNum" });
+      expect(d.reputation).toBeUndefined();
+      expect(d.slots).toBeUndefined();
+    });
+
+    it("NO FABRICATION: a non-finite numeric (Infinity / NaN as string) OMITS the field", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rInf", hostReputation: "Infinity", ramMb: "NaN" }));
+      const d = await hostDiagnostics({ address: "rInf" });
+      expect(d.reputation).toBeUndefined();
+      expect(d.specs).toBeUndefined();
+    });
+
+    it("NO FABRICATION: a boolean/object in a numeric field OMITS it (never coerced to 1/NaN-default)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rBool", hostReputation: true, ramMb: { x: 1 } }));
+      const d = await hostDiagnostics({ address: "rBool" });
+      expect(d.reputation).toBeUndefined();
+      expect(d.specs).toBeUndefined();
+    });
+
+    it("an already-number field passes through unchanged", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rNum", hostReputation: 200, maxInstances: 10, activeInstances: 2 }));
+      const d = await hostDiagnostics({ address: "rNum" });
+      expect(d.reputation).toBe(200);
+      expect(d.slots).toEqual({ active: 2, total: 10, available: 8 });
+    });
+
+    it("a missing numeric field STAYS missing (no default invented)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rMissing", version: "0.10.0" }));
+      const d = await hostDiagnostics({ address: "rMissing" });
+      expect(d.reputation).toBeUndefined();
+      expect(d.slots).toBeUndefined();
+      expect(d.lease).toBeUndefined();
+      expect(d.specs).toBeUndefined();
+      expect(d.registration?.version).toBe("0.10.0");
+    });
+
+    it("a non-string version/country (number) is OMITTED, not stringified (string fields too)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rTyp", version: 10, countryCode: 49, hostReputation: "150" }));
+      const d = await hostDiagnostics({ address: "rTyp" });
+      expect(d.registration?.version).toBeUndefined();   // never "10"
+      expect(d.registration?.countryCode).toBeUndefined();
+      expect(d.reputation).toBe(150);                     // the string-numeric still coerces
+    });
+
+    it("a string flagged='0' does NOT raise a false 'flagged' red-flag (coerced to 0 = falsy)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rFlag0", flagged: "0", hostReputation: "200", maxInstances: "5", activeInstances: "1" }));
+      const d = await hostDiagnostics({ address: "rFlag0" });
+      expect(d.redFlags.some((f) => /FLAGGED/.test(f))).toBe(false);
+    });
+
+    it("a string flagged='1' DOES raise the 'flagged' red-flag (coerced to 1 = truthy)", async () => {
+      __setFetchForTest(async () => jsonResp({ address: "rFlag1", flagged: "1", hostReputation: "200", maxInstances: "5", activeInstances: "1" }));
+      const d = await hostDiagnostics({ address: "rFlag1" });
+      expect(d.redFlags.some((f) => /FLAGGED/.test(f))).toBe(true);
+    });
+  });
+
   it("caches a successful lookup within TTL (no refetch)", async () => {
     let calls = 0;
     __setFetchForTest(async () => { calls++; return jsonResp({ address: "rCache", hostReputation: 100 }); });

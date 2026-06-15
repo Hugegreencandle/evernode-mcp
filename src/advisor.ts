@@ -74,14 +74,42 @@ const PREFER_SORT: Record<Prefer, string> = {
   reputation: "hostReputation:desc",       // highest reputation (the network's liveness/quality signal)
 };
 
+// Sound numeric coercion (NO FABRICATION). OnLedger sometimes returns numeric fields as STRINGS
+// (e.g. `reputation: "252"`). A blind `as number` cast would then leak a string through the
+// `number` output schema (runtime structuredContent validation could fail) AND silently bypass the
+// numeric red-flag comparisons (a string is never `< 50`). We coerce with `Number(x)` and accept
+// the result ONLY if it is a finite number; anything else (null/undefined/missing/"notanum"/NaN/
+// ±Infinity) yields `undefined`, so the field is OMITTED — never a fabricated 0/default, never a
+// bad type. `Number("")` is 0, so we reject empty/whitespace strings explicitly to avoid inventing
+// a 0. (`Number(true)` is 1 etc.; we also reject non-string/non-number inputs to stay honest.)
+function coerceNum(x: unknown): number | undefined {
+  if (typeof x === "number") return Number.isFinite(x) ? x : undefined;
+  if (typeof x === "string") {
+    if (x.trim() === "") return undefined;          // "" -> 0 would be fabrication; omit instead
+    const n = Number(x);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;                                  // booleans/objects/null/undefined -> omit
+}
+function coerceStr(x: unknown): string | undefined {
+  return typeof x === "string" ? x : undefined;      // never stringify a number/object into a field
+}
+
 function mapHost(h: Record<string, unknown>): HostRow {
   return {
-    address: String(h.address), leaseAmount: h.leaseAmount != null ? Number(h.leaseAmount) : undefined,
-    leaseDrops: h.leaseDrops as number, availableInstances: h.availableInstances as number,
-    maxInstances: h.maxInstances as number, activeInstances: h.activeInstances as number,
-    hostReputation: h.hostReputation as number, ramMb: h.ramMb as number, diskMb: h.diskMb as number,
-    countryCode: h.countryCode as string, version: h.version as string,
-    hostingType: h.hostingType as string, flagged: h.flagged as number,
+    address: String(h.address),
+    leaseAmount: coerceNum(h.leaseAmount),
+    leaseDrops: coerceNum(h.leaseDrops),
+    availableInstances: coerceNum(h.availableInstances),
+    maxInstances: coerceNum(h.maxInstances),
+    activeInstances: coerceNum(h.activeInstances),
+    hostReputation: coerceNum(h.hostReputation),
+    ramMb: coerceNum(h.ramMb),
+    diskMb: coerceNum(h.diskMb),
+    countryCode: coerceStr(h.countryCode),
+    version: coerceStr(h.version),
+    hostingType: coerceStr(h.hostingType),
+    flagged: coerceNum(h.flagged),
   };
 }
 

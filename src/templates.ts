@@ -138,13 +138,15 @@ const TEMPLATES: Record<string, { body: string; notes: string[] }> = {
         s.scores[who] = (s.scores[who] ?? 0) + m.points;
         await user.send(JSON.stringify({ score: s.scores[who] }));
       } else if (m.cmd === "leaderboard") {
-        const board = Object.entries(s.scores).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        // tiebreaker MUST be a locale-INDEPENDENT code-point comparison — localeCompare uses the
+        // host's ICU collation, which differs across nodes and would diverge the order (consensus).
+        const board = Object.entries(s.scores).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
         await user.send(JSON.stringify({ leaderboard: board.slice(0, 10) }));
       }
     }
   }
   save(s);`,
-    notes: ["Leaderboard sorts with a tiebreaker on public key so ordering is deterministic across nodes."],
+    notes: ["Leaderboard sorts with a code-point (locale-INDEPENDENT) tiebreaker on public key so ordering is deterministic across nodes — never localeCompare (host ICU collation diverges)."],
   },
 
   voting: {
