@@ -9,9 +9,27 @@ import { listTemplates, generate } from "./templates.js";
 import { checkDeterminism } from "./determinism.js";
 import { recommendPattern, estimateLease, recommendHosts, deployCommands, explainError, type HostRow } from "./advisor.js";
 import { generateSettlement } from "./settlement.js";
+import {
+  LIST_TEMPLATES_OUT, GENERATE_CONTRACT_OUT, CHECK_DETERMINISM_OUT, RECOMMEND_PATTERN_OUT,
+  CHECK_HOOK_COMPAT_OUT, GENERATE_SETTLEMENT_OUT, ESTIMATE_LEASE_OUT, RECOMMEND_HOSTS_OUT,
+  DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT,
+} from "./outputSchemas.js";
 
-const VERSION = "0.1.0";
-const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
+const VERSION = "0.2.0";
+
+// Every tool returns the human-readable JSON text AND validated structuredContent. The object we
+// return IS the structured payload (these tools never throw their own error result — handler
+// errors propagate to the SDK), so we hand the same object to both. Keep the pretty text for
+// humans; the structured copy is for agents (validated against each tool's outputSchema).
+const ok = (v: object) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }],
+  structuredContent: v as Record<string, unknown>,
+});
+
+// Shared annotations: every evernode-mcp tool is read-only/advisory (no keys, no spend, no deploy).
+// openWorldHint is true ONLY for the one tool that may reach the live OnLedger network.
+const OFFLINE = { readOnlyHint: true, openWorldHint: false, idempotentHint: true } as const;
+const LIVE = { readOnlyHint: true, openWorldHint: true, idempotentHint: true } as const;
 
 const server = new McpServer({ name: "evernode-mcp", version: VERSION });
 
@@ -19,7 +37,9 @@ server.registerTool("list_templates", {
   title: "List dApp templates",
   description: "List the available HotPocket dApp templates (escrow, subscription, game_backend, voting, token_gated, payment_splitter, blank).",
   inputSchema: {},
-}, async () => json({ templates: listTemplates() }));
+  outputSchema: LIST_TEMPLATES_OUT,
+  annotations: { title: "List dApp templates", ...OFFLINE },
+}, async () => ok({ templates: listTemplates() }));
 
 server.registerTool("generate_contract", {
   title: "Generate a HotPocket dApp",
@@ -28,25 +48,33 @@ server.registerTool("generate_contract", {
     template: z.enum(["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter"]),
     name: z.string().optional().describe("project/contract name (default: mycontract)"),
   },
-}, async ({ template, name }) => json(generate(template, name)));
+  outputSchema: GENERATE_CONTRACT_OUT,
+  annotations: { title: "Generate a HotPocket dApp", ...OFFLINE },
+}, async ({ template, name }) => ok(generate(template, name)));
 
 server.registerTool("check_determinism", {
   title: "Check contract determinism",
   description: "Heuristic scan of HotPocket contract source for non-deterministic patterns (wall-clock, randomness, network I/O, env, timers, unordered iteration) that break cluster consensus. HIGH findings are likely consensus breakers. Guidance, not a proof.",
   inputSchema: { source: z.string().describe("the contract JS/TS source to scan") },
-}, async ({ source }) => json(checkDeterminism(source)));
+  outputSchema: CHECK_DETERMINISM_OUT,
+  annotations: { title: "Check contract determinism (heuristic)", ...OFFLINE },
+}, async ({ source }) => ok(checkDeterminism(source)));
 
 server.registerTool("recommend_pattern", {
   title: "Recommend a HotPocket pattern",
   description: "Given a plain-English use-case, recommend the HotPocket pattern (node count, state model, oracle/NPL usage, Xahau settlement) with the determinism caveats that matter.",
   inputSchema: { use_case: z.string() },
-}, async ({ use_case }) => json(recommendPattern(use_case)));
+  outputSchema: RECOMMEND_PATTERN_OUT,
+  annotations: { title: "Recommend a HotPocket pattern", ...OFFLINE },
+}, async ({ use_case }) => ok(recommendPattern(use_case)));
 
 server.registerTool("check_hook_compat", {
   title: "Check Xahau Hook / WASM compatibility",
   description: "When a dApp settles value on Xahau through a Hook-guarded account, hands off to the trifecta: build/lint the Hook with xahc, simulate it with xahau-mcp, and PROVE the spend invariant with xahc-prover. Returns the recommended workflow.",
   inputSchema: { involves_hook: z.boolean().describe("does the dApp's Xahau account run a Hook?"), what: z.string().optional().describe("what the hook should enforce, e.g. 'per-tx spend limit'") },
-}, async ({ involves_hook, what }) => json({
+  outputSchema: CHECK_HOOK_COMPAT_OUT,
+  annotations: { title: "Check Xahau Hook / WASM compatibility", ...OFFLINE },
+}, async ({ involves_hook, what }) => ok({
   involvesHook: involves_hook,
   workflow: involves_hook ? [
     "1. Author + compile the Hook with `xahc` (build → clean → lint).",
@@ -66,8 +94,10 @@ server.registerTool("generate_settlement", {
     dest: z.string().optional().describe("optional r-address to LOCK payouts to (the DST hook param)"),
     cluster_account: z.string().optional().describe("the cluster's Xahau (multisig) account r-address"),
   },
+  outputSchema: GENERATE_SETTLEMENT_OUT,
+  annotations: { title: "Generate safe Xahau settlement", ...OFFLINE },
 }, async ({ template, limit_drops, dest, cluster_account }) =>
-  json(generateSettlement({ template, limitDrops: limit_drops, dest, clusterAccount: cluster_account })));
+  ok(generateSettlement({ template, limitDrops: limit_drops, dest, clusterAccount: cluster_account })));
 
 server.registerTool("estimate_lease_cost", {
   title: "Estimate EVR lease cost",
@@ -78,8 +108,10 @@ server.registerTool("estimate_lease_cost", {
     nodes: z.number().describe("cluster size"),
     moment_minutes: z.number().optional().describe("Moment window in minutes (default 60)"),
   },
+  outputSchema: ESTIMATE_LEASE_OUT,
+  annotations: { title: "Estimate EVR lease cost", ...OFFLINE },
 }, async ({ evr_per_moment, moments, nodes, moment_minutes }) =>
-  json(estimateLease({ evrPerMoment: evr_per_moment, moments, nodes, momentMinutes: moment_minutes })));
+  ok(estimateLease({ evrPerMoment: evr_per_moment, moments, nodes, momentMinutes: moment_minutes })));
 
 server.registerTool("recommend_hosts", {
   title: "Recommend Evernode hosts (live)",
@@ -97,8 +129,11 @@ server.registerTool("recommend_hosts", {
       hostReputation: z.number().optional(), ramMb: z.number().optional(), countryCode: z.string().optional(),
     })).optional().describe("optional: rank this supplied list instead of fetching live"),
   },
+  outputSchema: RECOMMEND_HOSTS_OUT,
+  // openWorldHint: true — this is the ONLY tool that may reach a live external endpoint (OnLedger).
+  annotations: { title: "Recommend Evernode hosts (live)", ...LIVE },
 }, async ({ prefer, min_reputation, min_slots, country, min_ram_mb, limit, hosts }) =>
-  json(await recommendHosts({
+  ok(await recommendHosts({
     hosts: hosts as HostRow[] | undefined, prefer, minRep: min_reputation,
     minSlots: min_slots, country, minRam: min_ram_mb, limit,
   })));
@@ -110,14 +145,18 @@ server.registerTool("generate_deploy_commands", {
     mode: z.enum(["local", "single", "cluster", "cluster-manager"]),
     host: z.string().optional(), nodes: z.number().optional(), instance_name: z.string().optional(),
   },
+  outputSchema: DEPLOY_COMMANDS_OUT,
+  annotations: { title: "Generate deploy commands", ...OFFLINE },
 }, async ({ mode, host, nodes, instance_name }) =>
-  json(deployCommands({ mode, host, nodes, instanceName: instance_name })));
+  ok(deployCommands({ mode, host, nodes, instanceName: instance_name }) ?? { steps: [], notes: [] }));
 
 server.registerTool("explain_error", {
   title: "Explain an Evernode/HotPocket error",
   description: "Map a HotPocket/Evernode error message to its likely cause and fix (connection, consensus stall, no hosts, insufficient EVR, lease expiry, docker, Hook rejection).",
   inputSchema: { error_text: z.string() },
-}, async ({ error_text }) => json(explainError(error_text)));
+  outputSchema: EXPLAIN_ERROR_OUT,
+  annotations: { title: "Explain an Evernode/HotPocket error", ...OFFLINE },
+}, async ({ error_text }) => ok(explainError(error_text)));
 
 // --- smoke self-test (no MCP client needed): `node dist/index.js --smoke` ------
 async function smoke() {

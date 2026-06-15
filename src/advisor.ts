@@ -84,6 +84,20 @@ function mapHost(h: Record<string, unknown>): HostRow {
   };
 }
 
+// Network hardening. The live OnLedger call must never hang the MCP server or leak an unhandled
+// rejection: we bound it with AbortSignal.timeout, catch ALL failures, and stay HONEST on failure
+// (empty hosts + a note saying why — never a fabricated fallback). A tiny in-memory TTL cache
+// avoids re-hitting OnLedger for an identical query within a short window.
+const FETCH_TIMEOUT_MS = 10_000;
+const CACHE_TTL_MS = 30_000;
+const hostCache = new Map<string, { at: number; value: { hosts: HostRow[]; source: string; query: string; note?: string } }>();
+
+// Allow tests to inject a fetch (default: global fetch). Kept module-private; not part of the API.
+type FetchFn = typeof fetch;
+let _fetch: FetchFn = (...args: Parameters<FetchFn>) => fetch(...args);
+export function __setFetchForTest(fn: FetchFn | null) { _fetch = fn ?? ((...a: Parameters<FetchFn>) => fetch(...a)); }
+export function __clearHostCache() { hostCache.clear(); }
+
 // Fetch live, already-ranked hosts from OnLedger. Honest on failure (no fabricated fallback).
 export async function fetchHostsLive(opts: { prefer?: Prefer; minRep?: number; minSlots?: number; country?: string; minRam?: number; limit?: number; }):
   Promise<{ hosts: HostRow[]; source: string; query: string; note?: string }> {
@@ -94,13 +108,27 @@ export async function fetchHostsLive(opts: { prefer?: Prefer; minRep?: number; m
   if (opts.country) p.set("country", opts.country);
   if (opts.minRam != null) p.set("minRam", String(opts.minRam));
   const url = `${ONLEDGER}/hosts?${p.toString()}`;
+
+  // Serve a fresh successful cache hit (don't cache failures — we want to retry those).
+  const cached = hostCache.get(url);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS && !cached.value.note) {
+    return { ...cached.value, note: "served from cache" };
+  }
+
   try {
-    const r = await fetch(url, { headers: { accept: "application/json" } });
+    const r = await _fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!r.ok) return { hosts: [], source: "api.onledger.net", query: url, note: `OnLedger returned HTTP ${r.status}` };
     const data = (await r.json()) as { hosts?: Record<string, unknown>[] };
-    return { hosts: (data.hosts ?? []).map(mapHost), source: "api.onledger.net", query: url };
+    const value = { hosts: (data.hosts ?? []).map(mapHost), source: "api.onledger.net", query: url };
+    hostCache.set(url, { at: Date.now(), value });
+    return value;
   } catch (e) {
-    return { hosts: [], source: "api.onledger.net", query: url, note: `fetch failed: ${(e as Error).message}` };
+    // AbortSignal.timeout aborts with a TimeoutError — report it clearly; never fabricate hosts.
+    const err = e as Error;
+    const note = err?.name === "TimeoutError" || err?.name === "AbortError"
+      ? `fetch timed out after ${FETCH_TIMEOUT_MS}ms`
+      : `fetch failed: ${err?.message ?? String(e)}`;
+    return { hosts: [], source: "api.onledger.net", query: url, note };
   }
 }
 

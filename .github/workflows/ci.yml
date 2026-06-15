@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # `npm ci` also runs the `prepare` script (tsc build) — devDeps are installed by default.
+      - name: Install
+        run: npm ci
+      - name: Build (type-check)
+        run: npm run build
+      - name: Test
+        run: npm test
+      - name: Smoke (offline self-test — templates determinism-clean, checker + math)
+        run: npm run smoke
