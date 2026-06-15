@@ -377,4 +377,41 @@ describe("determinism checker", () => {
       expect(summary).toMatch(/consensus/i);
     });
   });
+
+  // Adversarial verify 2026-06-15: prove the oracle_consumer "clean" verdict is EARNED, not blind.
+  // A broken oracle that acts on its OWN un-agreed observation via a non-consensused source must be
+  // caught HIGH; the only un-flagged "subtle" case (storing a plain consensused user input) is
+  // genuinely deterministic, so a clean result there is correct, not a miss.
+  describe("broken-oracle determinism catch", () => {
+    const high = (s: string) => checkDeterminism(s).findings.filter((f) => f.severity === "high").map((f) => f.rule);
+
+    it("catches an oracle that FETCHES the value from contract logic (network-io HIGH)", () => {
+      const src = `const m = JSON.parse((await ctx.users.read(inp)).toString());
+        const price = await fetch("https://api.example.com/price/" + m.key);
+        s.feed[m.key] = (await price.json()).value;`;
+      expect(high(src)).toContain("network-io");
+    });
+
+    it("catches an oracle that stamps its own observation with the wall clock (wall-clock-time HIGH)", () => {
+      const src = `s.feed[m.key] = { value: m.value, at: Date.now() };`;
+      expect(high(src)).toContain("wall-clock-time");
+    });
+
+    it("catches an oracle that picks a winner with Math.random (randomness HIGH)", () => {
+      const src = `const winner = proposals[Math.floor(Math.random() * proposals.length)];`;
+      expect(high(src)).toContain("randomness");
+    });
+
+    it("catches an oracle reading its quorum from process.env (node-env HIGH)", () => {
+      const src = `const need = Number(process.env.QUORUM);`;
+      expect(high(src)).toContain("node-env");
+    });
+
+    it("does NOT flag storing a PLAIN consensused user input (genuinely deterministic — clean is correct)", () => {
+      const src = `const m = JSON.parse((await ctx.users.read(inp)).toString());
+        if (m.cmd === "observe") s.feed[m.key] = m.value;`;
+      // No fetch/clock/random/env: a consensused input is identical on every node, so no HIGH finding.
+      expect(high(src)).toHaveLength(0);
+    });
+  });
 });

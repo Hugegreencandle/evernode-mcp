@@ -6,11 +6,12 @@ import { z } from "zod";
 import {
   LIST_TEMPLATES_OUT, GENERATE_CONTRACT_OUT, CHECK_DETERMINISM_OUT, RECOMMEND_PATTERN_OUT,
   CHECK_HOOK_COMPAT_OUT, GENERATE_SETTLEMENT_OUT, ESTIMATE_LEASE_OUT, RECOMMEND_HOSTS_OUT,
-  DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT,
+  DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT, CHECK_CONTRACT_API_OUT, HOST_DIAGNOSTICS_OUT,
 } from "../dist/outputSchemas.js";
 import { listTemplates, generate } from "../dist/templates.js";
 import { checkDeterminism } from "../dist/determinism.js";
-import { recommendPattern, estimateLease, recommendHosts, deployCommands, explainError } from "../dist/advisor.js";
+import { checkContractApi } from "../dist/contractApi.js";
+import { recommendPattern, estimateLease, recommendHosts, deployCommands, explainError, hostDiagnostics } from "../dist/advisor.js";
 import { generateSettlement } from "../dist/settlement.js";
 
 // The SDK validates structuredContent with .passthrough() semantics (undeclared fields pass).
@@ -32,6 +33,18 @@ describe("output schemas validate real tool output", () => {
     expect(S(CHECK_DETERMINISM_OUT).safeParse(checkDeterminism("const n = ctx.lclSeqNo;")).success).toBe(true);
     const r = S(CHECK_DETERMINISM_OUT).safeParse(checkDeterminism("const t = Date.now();"));
     expect(r.success).toBe(true);
+  });
+
+  it("check_contract_api (clean + with findings)", () => {
+    expect(S(CHECK_CONTRACT_API_OUT).safeParse(checkContractApi(generate("escrow").files["src/index.js"])).success).toBe(true);
+    expect(S(CHECK_CONTRACT_API_OUT).safeParse(checkContractApi("const t = Date.now();")).success).toBe(true);
+  });
+
+  it("host_diagnostics (supplied host + not-found shape)", async () => {
+    const a = await hostDiagnostics({ host: { address: "rX", hostReputation: 100, maxInstances: 4, activeInstances: 1 } });
+    expect(S(HOST_DIAGNOSTICS_OUT).safeParse(a).success).toBe(true);
+    const b = await hostDiagnostics({});   // honest found:false shape
+    expect(S(HOST_DIAGNOSTICS_OUT).safeParse(b).success).toBe(true);
   });
 
   it("recommend_pattern", () => {

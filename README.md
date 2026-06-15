@@ -34,30 +34,32 @@ off to the trifecta — it never re-asserts settlement safety itself (`check_hoo
 
 ## Tools
 
-All ten tools are **read-only / advisory**. Every tool sets `readOnlyHint: true`; only
-`recommend_hosts` sets `openWorldHint: true` (the one tool that may reach a live external endpoint,
-OnLedger). Each tool publishes an **output schema**, so an agent gets a validated
-`structuredContent` shape (not just text) — no guessing field names.
+All twelve tools are **read-only / advisory**. Every tool sets `readOnlyHint: true`; only the two
+live OnLedger tools (`recommend_hosts`, `host_diagnostics`) set `openWorldHint: true` (they may reach
+a live external endpoint, OnLedger). Each tool publishes an **output schema**, so an agent gets a
+validated `structuredContent` shape (not just text) — no guessing field names.
 
 | tool | open world? | returns |
 |---|---|---|
-| `list_templates` | no | `{ templates }` — the 7 available dApp template names. |
+| `list_templates` | no | `{ templates }` — the 10 available dApp template names. |
 | `generate_contract` | no | `{ template, files, notes }` — a complete, determinism-clean HotPocket file set (contract + state helper + `hp.cfg.override` + `package.json` + client) for a template. |
 | `check_determinism` | no | `{ findings, summary }` — **the differentiator.** A heuristic scan of contract source for non-deterministic patterns (wall-clock, randomness, network I/O, env/host reads, timers, unordered iteration) that break cluster consensus. Each finding has `line/column/rule/severity/why/fix`. HIGH findings are likely consensus breakers. Guidance, **not a proof**. |
+| `check_contract_api` | no | `{ findings, summary }` — **sibling to `check_determinism`** (same honest framing — guidance, **not a proof**). A heuristic static check that a HotPocket Node.js contract uses the contract API correctly: an `hpc.init(...)` entry point, reading `ctx` (`users`/`lclSeqNo`), persisting ONLY through the consensused state mechanism (no arbitrary `fs` writes to non-state paths), handling `ctx.users` I/O, using `ctx.lclSeqNo` for time (not `Date.now`), and awaiting async consensus ops. Each finding has `line/column/rule/severity/why/fix`. |
 | `recommend_pattern` | no | `{ pattern, nodes, notes }` — given a plain-English use-case, the HotPocket pattern: node count, state model, oracle/NPL usage, Xahau settlement, and the determinism caveats that matter. |
 | `check_hook_compat` | no | `{ involvesHook, workflow, repos }` — when a dApp settles via a Xahau Hook, the exact **write → simulate → prove** handoff to the trifecta (xahc · xahau-mcp · xahc-prover). |
-| `generate_settlement` | no | `{ template, limitDrops, files, install, prove, notes }` — cluster-side Xahau payout code + the `install` of the trifecta's PROVEN `agent_guardrail` Hook (per-tx `LIM` + optional `DST` lock) + the exact `xahc prove` command. "Safe by construction → proven safe": the ledger enforces the cap even if the contract/signer is wrong. |
+| `generate_settlement` | no | `{ template, limitDrops, files, install, prove, notes }` — cluster-side Xahau payout code + the `install` of the trifecta's PROVEN `agent_guardrail` Hook (per-tx `LIM` + optional `DST` lock) + the exact `xahc prove` command. "Safe by construction → proven safe": the ledger enforces the cap even if the contract/signer is wrong. Accepts `escrow` / `subscription` / `payment_splitter` / `streaming_payment` / `multisig_treasury`. |
 | `estimate_lease_cost` | no | `{ inputs, perNodeEVR, totalEVR, approxDurationHours, notes }` — tenant EVR lease = `evrPerMoment × moments × nodes`. Honest: rates are **host-set** (no network standard); host-side registration fees are excluded. |
 | `recommend_hosts` | **yes** | `{ mode, ranked, prefer, note, source?, query? }` — fetch + rank **live** Evernode hosts from [OnLedger](https://api.onledger.net) (real-time from the Xahau registry hook) by `cheap` / `capacity` / `reputation`, with filters (min reputation/slots/RAM, country) — or rank a `hosts` list you supply. **Real data only — never invents hosts**; honest empty + note on fetch failure. |
+| `host_diagnostics` | **yes** | `{ found, address, source, note?, registration?, reputation?, slots?, lease?, specs?, redFlags }` — health view of a single Evernode host by r-address: registration status, reputation, active/total/available slots, lease terms (rate/drops if available), specs, and red-flags (low reputation, full capacity, flagged/stale). Fetches **live** from OnLedger — or diagnose a `host` object you supply. **Real data only**: unknown fields are **omitted** (never invented); honest `found:false` + note on not-found / fetch failure. |
 | `generate_deploy_commands` | no | `{ steps, notes }` — command sequences for `local` (hpdevkit dev cluster) · `single` (evdevkit acquire one host) · `cluster` (evdevkit N-node) · `cluster-manager` (connect to the Offledger Cluster Manager). |
 | `explain_error` | no | `{ matched, explanations? / message? }` — map a HotPocket/Evernode error to cause + fix (connection, consensus stall, no hosts, insufficient EVR, lease expiry, docker/Sashimono, Hook rejection). |
 
 ## Templates
 
-`generate_contract` ships 7 templates. Each is **deterministic by construction** (no wall-clock,
+`generate_contract` ships 10 templates. Each is **deterministic by construction** (no wall-clock,
 no randomness, no network in the contract path; time is the consensus ledger seq `ctx.lclSeqNo`;
 state persists only through the contract's own consensused state file) and is dogfooded clean
-through `check_determinism` (no HIGH findings) by the smoke test and the suite.
+through `check_determinism` (no HIGH findings) and `check_contract_api` by the smoke test and the suite.
 
 | template | what it is | determinism note |
 |---|---|---|
@@ -68,6 +70,9 @@ through `check_determinism` (no HIGH findings) by the smoke test and the suite.
 | `voting` | one-vote-per-pubkey poll with tally. | tally iterates a **sorted** key view; votes keyed by pubkey dedupe. |
 | `token_gated` | gated access via an admin-maintained allowlist. | **does not read an on-chain balance** from contract logic (non-deterministic) — uses a consensused allowlist/oracle attestation. |
 | `payment_splitter` | records deposits, computes weighted splits in integer drops. | remainder to the last recipient so payouts **sum exactly** (no rounding leak); actual payout is a separate Xahau multisig step (see `generate_settlement`). |
+| `oracle_consumer` | the canonical hard pattern: brings external data in via **NPL agreement** (nodes agree on the value before acting), never a direct fetch. | nodes PROPOSE their observation over the Node Party Line and only ACT on a strict-majority **agreed** value (a primitive, so its canonical form is byte-identical); disagreement is a deterministic no-op; the agreed datum is stamped with `ctx.lclSeqNo`. |
+| `streaming_payment` | per-ledger-seq vesting: releasable amount is `release = f(ctx.lclSeqNo)`. | pure function of the consensus clock, integer drops only (no float divergence); the contract RECORDS the release — the actual transfer is **deferred** to `generate_settlement`. |
+| `multisig_treasury` | records spend proposals + M-of-N approvals (threshold). | approvals keyed by signer pubkey, counted over a **sorted** view; on reaching the threshold it **emits the settlement step** to `generate_settlement` (ties the trifecta in) — the contract never signs/spends. |
 
 Each generated file set carries notes including "before deploy: run `check_determinism` on
 `src/index.js` — HIGH findings break consensus."
@@ -159,6 +164,9 @@ Point any MCP-capable agent at the server and just ask, e.g.:
 
 - *"Scaffold an escrow HotPocket dApp called `vault`."* → `generate_contract`
 - *"Is this contract safe for cluster consensus?"* (paste source) → `check_determinism`
+- *"Does this contract use the HotPocket API correctly?"* (paste source) → `check_contract_api`
+- *"Scaffold an oracle dApp that agrees on a price via NPL."* → `generate_contract` (`oracle_consumer`)
+- *"Is host rHostAddr… healthy enough to lease?"* → `host_diagnostics` (live)
 - *"What pattern should I use for a token-gated forum?"* → `recommend_pattern`
 - *"Find me the 5 cheapest active Evernode hosts in Germany."* → `recommend_hosts` (live)
 - *"Estimate the EVR to run a 3-node cluster for 720 moments at 2 EVR/moment."* → `estimate_lease_cost`
@@ -173,7 +181,7 @@ npm run smoke      # node dist/index.js --smoke — offline self-test
 node dist/index.js # run as a stdio MCP server
 ```
 
-- **Tests** (`tests/`): `determinism` (rule coverage incl. the regression floor + new gaps), `advisor` (lease math, host ranking, error mapping, pattern/deploy branches), `templates` (per-template build + determinism-clean), `settlement` (LIM encoding + trifecta handoff shape), `outputSchemas` (each handler's real output validates against its published schema), `index` (end-to-end: every tool driven through an in-memory MCP client, input-schema rejection), and `fetch` (live-path hardening, mocked).
+- **Tests** (`tests/`): `determinism` (rule coverage incl. the regression floor + new gaps), `contractApi` (good contract clean + each API-misuse flagged), `advisor` (lease math, host ranking, error mapping, pattern/deploy branches), `templates` (per-template build + determinism-clean + per-template invariants), `settlement` (LIM encoding + trifecta handoff shape), `outputSchemas` (each handler's real output validates against its published schema), `index` (end-to-end: every tool driven through an in-memory MCP client, input-schema rejection), `hostDiagnostics` (healthy / red-flag / not-found / fetch-failure honesty, mocked fetch), and `fetch` (live-path hardening, mocked).
 - **CI** (`.github/workflows/ci.yml`): on push + PR to `main`, runs `npm ci`, `npm run build`, `npm test`, and `npm run smoke` on Node 20.
 - **`createServer()`** is exported from `src/index.ts` so the server can be driven over an in-memory transport in tests without starting the stdio transport.
 

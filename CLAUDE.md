@@ -13,8 +13,9 @@ xahc-prover). TypeScript, ESM, MCP SDK 1.29, node ≥ 20 — mirrors xahau-mcp's
 ## Layout (`src/`)
 - `index.ts` — MCP server; registers every tool (one `server.registerTool` each).
 - `determinism.ts` — the heuristic non-determinism scanner (the differentiator).
-- `templates.ts` — the 7 dApp templates + the shared scaffold (contract/state/cfg/client).
-- `advisor.ts` — pattern advice, EVR estimate, host ranking, deploy commands, error explainer.
+- `templates.ts` — the 10 dApp templates + the shared scaffold (contract/state/cfg/client).
+- `contractApi.ts` — the heuristic HotPocket contract-API usage checker (sibling to determinism.ts).
+- `advisor.ts` — pattern advice, EVR estimate, host ranking + diagnostics, deploy commands, error explainer.
 
 ## THE PRODUCT RULE: determinism + honesty
 - HotPocket consensuses contract output across all nodes. **Non-deterministic code breaks

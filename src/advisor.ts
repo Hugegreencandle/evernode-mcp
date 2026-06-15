@@ -64,6 +64,7 @@ export interface HostRow {
   address: string; leaseAmount?: number; leaseDrops?: number; availableInstances?: number;
   maxInstances?: number; activeInstances?: number; hostReputation?: number; ramMb?: number;
   diskMb?: number; countryCode?: string; version?: string; hostingType?: string; flagged?: number;
+  lastHeartbeatLedger?: number;
 }
 
 const ONLEDGER = "https://api.onledger.net";
@@ -152,6 +153,114 @@ export async function recommendHosts(opts: { hosts?: HostRow[]; prefer?: Prefer;
   if (opts.hosts && opts.hosts.length) return { mode: "ranked-supplied", ...rankHosts(opts.hosts, opts.prefer) };
   const live = await fetchHostsLive(opts);
   return { mode: "live-onledger", source: live.source, query: live.query, note: live.note, prefer: opts.prefer ?? "cheap", ranked: live.hosts };
+}
+
+// ---- Host diagnostics (live from OnLedger; REAL data only — never fabricates) ----
+// Given a host r-address, fetch its live record from OnLedger and report a health view:
+// registration status, reputation, slot capacity, lease terms (if the source carries them), and
+// red-flags. HONEST on unknown: a field the source doesn't provide is OMITTED, never invented; a
+// not-found / fetch failure returns found:false + a note. Reuses the same hardened fetch
+// (timeout + cache) discipline as the host list path.
+export interface HostDiagnostics {
+  found: boolean;
+  address: string;
+  source: string;
+  note?: string;
+  registration?: { registered: boolean; version?: string; countryCode?: string };
+  reputation?: number;
+  slots?: { active?: number; total?: number; available?: number };
+  lease?: { evrPerMoment?: number; leaseDrops?: number };
+  specs?: { ramMb?: number; diskMb?: number };
+  redFlags: string[];
+}
+
+// Fetch a single host record by address. Honest on failure (no fabricated fallback). Cached.
+export async function fetchHostByAddress(address: string):
+  Promise<{ host?: HostRow; source: string; query: string; note?: string }> {
+  const url = `${ONLEDGER}/host/${encodeURIComponent(address)}`;
+  const cached = hostCache.get(url);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS && !cached.value.note) {
+    return { host: cached.value.hosts[0], source: cached.value.source, query: url, note: "served from cache" };
+  }
+  try {
+    const r = await _fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (r.status === 404) return { source: "api.onledger.net", query: url, note: "host not found on OnLedger (not registered, or wrong r-address)" };
+    if (!r.ok) return { source: "api.onledger.net", query: url, note: `OnLedger returned HTTP ${r.status}` };
+    const data = (await r.json()) as unknown;
+    // A non-object body (null / primitive / array) carries no host record — honest empty, never a throw.
+    if (data == null || typeof data !== "object" || Array.isArray(data)) {
+      return { source: "api.onledger.net", query: url, note: "host not found on OnLedger (empty record)" };
+    }
+    const d = data as Record<string, unknown> & { host?: unknown };
+    // OnLedger may return the record bare or wrapped in { host: {...} }; tolerate both.
+    const raw = (d.host && typeof d.host === "object") ? (d.host as Record<string, unknown>) : d;
+    if (!raw || raw.address == null) return { source: "api.onledger.net", query: url, note: "host not found on OnLedger (empty record)" };
+    const host = mapHost(raw as Record<string, unknown>);
+    hostCache.set(url, { at: Date.now(), value: { hosts: [host], source: "api.onledger.net", query: url } });
+    return { host, source: "api.onledger.net", query: url };
+  } catch (e) {
+    const err = e as Error;
+    const note = err?.name === "TimeoutError" || err?.name === "AbortError"
+      ? `fetch timed out after ${FETCH_TIMEOUT_MS}ms`
+      : `fetch failed: ${err?.message ?? String(e)}`;
+    return { source: "api.onledger.net", query: url, note };
+  }
+}
+
+// Build the health view from a host record. ONLY emits fields the record actually carries — an
+// undefined source field is omitted (never guessed). Red-flags are derived from present data only.
+export function diagnoseHost(h: HostRow): HostDiagnostics {
+  const total = h.maxInstances;
+  const active = h.activeInstances;
+  const available = h.availableInstances ?? (total != null && active != null ? total - active : undefined);
+  const redFlags: string[] = [];
+  if (h.flagged) redFlags.push("host is FLAGGED in the registry");
+  if (h.hostReputation != null && h.hostReputation < 50) redFlags.push(`low reputation (${h.hostReputation}/255)`);
+  if (available != null && available <= 0) redFlags.push("at full capacity (no free instances)");
+  if (h.hostReputation === 0) redFlags.push("zero reputation — likely stale/never-active");
+
+  const d: HostDiagnostics = {
+    found: true,
+    address: h.address,
+    source: "api.onledger.net",
+    registration: { registered: true },
+    redFlags,
+  };
+  // Attach only fields that are actually present (honest omission of unknowns).
+  if (h.version != null) d.registration!.version = h.version;
+  if (h.countryCode != null) d.registration!.countryCode = h.countryCode;
+  if (h.hostReputation != null) d.reputation = h.hostReputation;
+  const slots: NonNullable<HostDiagnostics["slots"]> = {};
+  if (active != null) slots.active = active;
+  if (total != null) slots.total = total;
+  if (available != null) slots.available = available;
+  if (Object.keys(slots).length) d.slots = slots;
+  const lease: NonNullable<HostDiagnostics["lease"]> = {};
+  if (h.leaseAmount != null) lease.evrPerMoment = h.leaseAmount;
+  if (h.leaseDrops != null) lease.leaseDrops = h.leaseDrops;
+  if (Object.keys(lease).length) d.lease = lease;
+  const specs: NonNullable<HostDiagnostics["specs"]> = {};
+  if (h.ramMb != null) specs.ramMb = h.ramMb;
+  if (h.diskMb != null) specs.diskMb = h.diskMb;
+  if (Object.keys(specs).length) d.specs = specs;
+  if (redFlags.length === 0) redFlags.push("none detected from the available fields (verify recent liveness before leasing)");
+  return d;
+}
+
+// Orchestrator used by the MCP tool: diagnose a supplied host, else fetch it live by address.
+export async function hostDiagnostics(opts: { address?: string; host?: HostRow }): Promise<HostDiagnostics> {
+  if (opts.host && opts.host.address) return diagnoseHost(opts.host);
+  if (!opts.address) {
+    return { found: false, address: "", source: "api.onledger.net", redFlags: [],
+      note: "provide a host `address` (r-address) to look up live, or a `host` object to diagnose. This tool reports REAL host data only — it never invents a host." };
+  }
+  const live = await fetchHostByAddress(opts.address);
+  if (!live.host) {
+    return { found: false, address: opts.address, source: live.source, redFlags: [], note: live.note };
+  }
+  const d = diagnoseHost(live.host);
+  if (live.note) d.note = live.note;   // e.g. "served from cache"
+  return d;
 }
 
 // ---- Deploy command generator -------------------------------------------------

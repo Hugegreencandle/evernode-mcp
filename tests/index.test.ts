@@ -25,22 +25,22 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 
 describe("MCP server tool registry", () => {
-  it("registers exactly the 10 advisory tools", async () => {
+  it("registers exactly the 12 advisory tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "check_determinism", "check_hook_compat", "estimate_lease_cost", "explain_error",
-      "generate_contract", "generate_deploy_commands", "generate_settlement",
-      "list_templates", "recommend_hosts", "recommend_pattern",
+      "check_contract_api", "check_determinism", "check_hook_compat", "estimate_lease_cost",
+      "explain_error", "generate_contract", "generate_deploy_commands", "generate_settlement",
+      "host_diagnostics", "list_templates", "recommend_hosts", "recommend_pattern",
     ]);
   });
 
-  it("every tool is read-only; only recommend_hosts opens the world (live OnLedger)", async () => {
+  it("every tool is read-only; only the live OnLedger tools open the world", async () => {
     const { tools } = await client.listTools();
+    const live = new Set(["recommend_hosts", "host_diagnostics"]);
     for (const t of tools) {
       expect(t.annotations?.readOnlyHint, `${t.name} should be readOnly`).toBe(true);
-      const expectOpen = t.name === "recommend_hosts";
-      expect(t.annotations?.openWorldHint, `${t.name} openWorldHint`).toBe(expectOpen);
+      expect(t.annotations?.openWorldHint, `${t.name} openWorldHint`).toBe(live.has(t.name));
     }
   });
 
@@ -54,15 +54,25 @@ describe("tool handlers return valid structuredContent", () => {
   it("list_templates", async () => {
     const s = await call("list_templates");
     expect(s.templates).toContain("escrow");
-    expect(s.templates.length).toBe(7);
+    expect(s.templates).toContain("oracle_consumer");
+    expect(s.templates.length).toBe(10);
   });
 
   it("generate_contract (each template)", async () => {
-    for (const template of ["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter"]) {
+    for (const template of ["blank", "escrow", "subscription", "game_backend", "voting", "token_gated",
+                            "payment_splitter", "oracle_consumer", "streaming_payment", "multisig_treasury"]) {
       const s = await call("generate_contract", { template, name: "x" });
       expect(s.template).toBe(template);
       expect(s.files["src/index.js"]).toContain("hpc.init");
     }
+  });
+
+  it("check_contract_api flags HIGH misuse and is clean on a good contract", async () => {
+    const bad = await call("check_contract_api", { source: "const t = Date.now(); ctx.users.read(inp);" });
+    expect(bad.findings.some((f: any) => f.severity === "high")).toBe(true);
+    expect(bad.summary).toMatch(/not a proof/i);
+    const good = await call("check_contract_api", { source: "const hpc = new HotPocket.Contract(); hpc.init(async (ctx) => { for (const u of ctx.users.list()) { const m = await ctx.users.read(u.inputs[0]); await u.send('ok'+ctx.lclSeqNo); } });" });
+    expect(good.findings.length).toBe(0);
   });
 
   it("check_determinism flags HIGH consensus breakers", async () => {
@@ -117,6 +127,27 @@ describe("tool handlers return valid structuredContent", () => {
     });
     expect(s.mode).toBe("ranked-supplied");
     expect(s.ranked[0].address).toBe("rB");
+  });
+
+  it("host_diagnostics diagnoses a SUPPLIED host (offline, no network) + honest on no input", async () => {
+    const s = await call("host_diagnostics", { host: { address: "rH", hostReputation: 10, maxInstances: 2, activeInstances: 2 } });
+    expect(s.found).toBe(true);
+    expect(s.address).toBe("rH");
+    expect(Array.isArray(s.redFlags)).toBe(true);
+    expect(s.redFlags.some((f: string) => /reputation|capacity/.test(f))).toBe(true);
+    expect(s.lease).toBeUndefined();   // no fabrication of unknown fields
+    const none = await call("host_diagnostics", {});
+    expect(none.found).toBe(false);
+    expect(none.note).toMatch(/provide a host/i);
+  });
+
+  it("generate_settlement accepts the new value-moving templates", async () => {
+    for (const template of ["streaming_payment", "multisig_treasury"]) {
+      const s = await call("generate_settlement", { template, limit_drops: 1_000_000, cluster_account: "rCl" });
+      expect(s.template).toBe(template);
+      expect(s.install).toContain("agent_guardrail.wasm");
+      expect(s.prove).toContain("--invariant guardrail");
+    }
   });
 
   it("generate_deploy_commands (each mode)", async () => {

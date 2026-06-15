@@ -5,6 +5,52 @@ All notable changes to evernode-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-15
+
+Features pass: 3 new dApp templates (the harder consensus patterns), a contract-API checker, and a
+live host-diagnostics tool. evernode-mcp stays **advisory** — no key custody, no EVR spend, no lease
+acquisition. The two new checkers are HEURISTIC (guidance, never a proof), and `host_diagnostics`
+returns **real OnLedger data only** (unknown fields omitted, honest on not-found/failure — never
+fabricated). Settlement safety stays delegated to the trifecta (xahc · xahau-mcp · xahc-prover).
+
+### Added
+- **3 new dApp templates** (`generate_contract`), each determinism-clean (0 findings) AND contract-API-clean:
+  - `oracle_consumer` — the canonical HARD pattern: external data brought in via an **NPL agreement**
+    (nodes PROPOSE their observation over the Node Party Line and only ACT on a strict-majority **agreed**
+    primitive value), NEVER a direct fetch. Disagreement is a deterministic no-op; the agreed datum is
+    stamped with `ctx.lclSeqNo`. Demonstrates the determinism-safe way to use off-chain data.
+  - `streaming_payment` — per-ledger-seq vesting: `release = f(ctx.lclSeqNo)`, integer drops only (no
+    float divergence). The contract RECORDS the release; the actual transfer is **deferred** to
+    `generate_settlement`.
+  - `multisig_treasury` — records spend proposals + M-of-N approvals (threshold counted over a sorted
+    view); on reaching the threshold it **emits the settlement step** to `generate_settlement` (ties the
+    trifecta in). The contract never signs or moves value.
+  - `generate_settlement` now also accepts `streaming_payment` and `multisig_treasury`.
+- **New tool `check_contract_api`** (offline; `readOnlyHint:true`, `openWorldHint:false`) — a HEURISTIC
+  static check (sibling to `check_determinism`, same honest "guidance, not a proof" framing) that a
+  HotPocket Node.js contract uses the API correctly: flags a missing `hpc.init(...)` / contract entry,
+  not reading `ctx` (users/lclSeqNo), persisting outside the consensused state mechanism (arbitrary `fs`
+  writes to non-state paths), unhandled `ctx.users` I/O, `Date.now` for time instead of `lclSeqNo`
+  (cross-refs determinism), and missing `await` on async consensus ops. Severity-rated with `why` + `fix`;
+  output schema + input Zod + annotations.
+- **New tool `host_diagnostics`** (live; `readOnlyHint:true`, `openWorldHint:true`) — health view of a
+  single Evernode host by r-address (registration, reputation, active/total/available slots, lease terms,
+  specs, red-flags) pulled live from OnLedger (reusing the hardened timeout/cache fetch), or diagnose a
+  supplied `host`. **REAL data only**: unknown fields are OMITTED (never invented); not-found / fetch
+  failure → `found:false` + a note, never a fabricated host. Output schema + input Zod + annotations.
+- **Tests, 216 → 265**: 3 new templates (build + determinism-clean + per-template invariants),
+  `contractApi` (good contract clean + each misuse flagged with the right rule/severity, honest summary),
+  `hostDiagnostics` (healthy / red-flag / not-found / empty / fetch-failure / timeout / cached / supplied /
+  no-input honesty, mocked fetch), plus e2e registry (12 tools), output-schema, and settlement-enum coverage.
+- **Smoke self-test, 14 → 25 checks**: the 3 new templates determinism- + contract-API-clean, the
+  contract-API checker (good clean / misuse flagged), and `host_diagnostics` no-fabrication (red-flags from
+  real fields, unknown fields omitted, honest `found:false` on no input).
+
+### Changed
+- **Version 0.3.0 → 0.4.0.**
+- **README** updated: the 12-tool catalog (the two new tools with returns + open-world flags; the two live
+  OnLedger tools now noted), the 10-template table (3 new rows), new usage examples, and the test list.
+
 ## [0.3.0] - 2026-06-15
 
 Depth pass: determinism-checker coverage upgrade, roughly doubled test depth, and a README brought

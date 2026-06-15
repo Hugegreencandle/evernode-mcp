@@ -5,7 +5,8 @@ import { checkDeterminism } from "../dist/determinism.js";
 describe("templates", () => {
   it("lists the expected templates", () => {
     expect(listTemplates().sort()).toEqual(
-      ["blank", "escrow", "game_backend", "payment_splitter", "subscription", "token_gated", "voting"]);
+      ["blank", "escrow", "game_backend", "multisig_treasury", "oracle_consumer", "payment_splitter",
+       "streaming_payment", "subscription", "token_gated", "voting"]);
   });
 
   it("every template generates a complete file set", () => {
@@ -42,7 +43,8 @@ describe("templates", () => {
   });
 
   // --- per-template build + determinism-clean (the smoke check, asserted per template) ---
-  const ALL = ["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter"] as const;
+  const ALL = ["blank", "escrow", "subscription", "game_backend", "voting", "token_gated",
+    "payment_splitter", "oracle_consumer", "streaming_payment", "multisig_treasury"] as const;
   for (const t of ALL) {
     describe(`template '${t}'`, () => {
       it("builds the full 5-file set", () => {
@@ -95,5 +97,32 @@ describe("templates", () => {
     const src = generate("token_gated").files["src/index.js"];
     expect(src).not.toMatch(/\bfetch\s*\(/);
     expect(src).toMatch(/allow/); // admin-maintained allowlist
+  });
+
+  // --- new v0.4.0 templates ---
+  it("oracle_consumer brings external data in via NPL agreement, NEVER a direct fetch", () => {
+    const src = generate("oracle_consumer").files["src/index.js"];
+    expect(src).not.toMatch(/\bfetch\s*\(/);            // no direct network fetch in contract logic
+    expect(src).toMatch(/ctx\.npl/);                    // uses the Node Party Line
+    expect(src).toMatch(/Object\.keys\([^)]*\)\.sort\(\)/); // sorted tally -> deterministic agreement
+    expect(src).toMatch(/ctx\.lclSeqNo/);              // stamps the agreed datum with the ledger clock
+    expect(JSON.stringify(generate("oracle_consumer").notes)).toMatch(/NPL|Node Party Line/);
+  });
+  it("streaming_payment vests as a pure function of ctx.lclSeqNo and DEFERS the transfer", () => {
+    const src = generate("streaming_payment").files["src/index.js"];
+    expect(src).toMatch(/ctx\.lclSeqNo/);              // release = f(lclSeqNo)
+    expect(src).not.toMatch(/Date\.now|Math\.random/); // no wall-clock / randomness
+    expect(src).toMatch(/Math\.floor/);                // integer drops, no float divergence
+    expect(JSON.stringify(generate("streaming_payment").notes)).toMatch(/generate_settlement/); // transfer deferred
+  });
+  it("multisig_treasury counts approvals over a SORTED view + emits the settlement step", () => {
+    const src = generate("multisig_treasury").files["src/index.js"];
+    expect(src).toMatch(/threshold/);
+    expect(src).toMatch(/Object\.keys\([^)]*\)\.sort\(\)/); // deterministic approval count
+    expect(JSON.stringify(generate("multisig_treasury").notes)).toMatch(/generate_settlement/);
+  });
+  it("the new value-moving templates are registerable for generate_settlement (streaming_payment, multisig_treasury)", () => {
+    // sanity: the settlement enum was extended to include them (asserted end-to-end in index.test.ts).
+    expect(["streaming_payment", "multisig_treasury"].every((t) => listTemplates().includes(t))).toBe(true);
   });
 });

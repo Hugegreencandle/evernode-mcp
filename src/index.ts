@@ -7,15 +7,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { listTemplates, generate } from "./templates.js";
 import { checkDeterminism } from "./determinism.js";
-import { recommendPattern, estimateLease, recommendHosts, deployCommands, explainError, type HostRow } from "./advisor.js";
+import { checkContractApi } from "./contractApi.js";
+import { recommendPattern, estimateLease, recommendHosts, deployCommands, explainError, hostDiagnostics, type HostRow } from "./advisor.js";
 import { generateSettlement } from "./settlement.js";
 import {
   LIST_TEMPLATES_OUT, GENERATE_CONTRACT_OUT, CHECK_DETERMINISM_OUT, RECOMMEND_PATTERN_OUT,
   CHECK_HOOK_COMPAT_OUT, GENERATE_SETTLEMENT_OUT, ESTIMATE_LEASE_OUT, RECOMMEND_HOSTS_OUT,
-  DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT,
+  DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT, CHECK_CONTRACT_API_OUT, HOST_DIAGNOSTICS_OUT,
 } from "./outputSchemas.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 // Every tool returns the human-readable JSON text AND validated structuredContent. The object we
 // return IS the structured payload (these tools never throw their own error result — handler
@@ -38,7 +39,7 @@ const server = new McpServer({ name: "evernode-mcp", version: VERSION });
 
 server.registerTool("list_templates", {
   title: "List dApp templates",
-  description: "List the available HotPocket dApp templates (escrow, subscription, game_backend, voting, token_gated, payment_splitter, blank).",
+  description: "List the available HotPocket dApp templates (escrow, subscription, game_backend, voting, token_gated, payment_splitter, oracle_consumer, streaming_payment, multisig_treasury, blank).",
   inputSchema: {},
   outputSchema: LIST_TEMPLATES_OUT,
   annotations: { title: "List dApp templates", ...OFFLINE },
@@ -48,7 +49,7 @@ server.registerTool("generate_contract", {
   title: "Generate a HotPocket dApp",
   description: "Generate a deterministic-by-construction HotPocket dApp file set (contract + state helper + hp.cfg.override + package.json + client) for a template.",
   inputSchema: {
-    template: z.enum(["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter"]),
+    template: z.enum(["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter", "oracle_consumer", "streaming_payment", "multisig_treasury"]),
     name: z.string().optional().describe("project/contract name (default: mycontract)"),
   },
   outputSchema: GENERATE_CONTRACT_OUT,
@@ -62,6 +63,14 @@ server.registerTool("check_determinism", {
   outputSchema: CHECK_DETERMINISM_OUT,
   annotations: { title: "Check contract determinism (heuristic)", ...OFFLINE },
 }, async ({ source }) => ok(checkDeterminism(source)));
+
+server.registerTool("check_contract_api", {
+  title: "Check HotPocket contract API usage",
+  description: "Heuristic static check that a HotPocket Node.js contract uses the contract API correctly: an hpc.init(...) entry point, reading ctx (users / lclSeqNo), persisting ONLY through the consensused state mechanism (no arbitrary fs writes to non-state paths), handling ctx.users I/O, using ctx.lclSeqNo for time (not Date.now), and awaiting async consensus ops. Severity-rated with fix + why. Sibling to check_determinism — guidance, NOT a proof.",
+  inputSchema: { source: z.string().describe("the HotPocket contract JS/TS source to check") },
+  outputSchema: CHECK_CONTRACT_API_OUT,
+  annotations: { title: "Check HotPocket contract API usage (heuristic)", ...OFFLINE },
+}, async ({ source }) => ok(checkContractApi(source)));
 
 server.registerTool("recommend_pattern", {
   title: "Recommend a HotPocket pattern",
@@ -92,7 +101,7 @@ server.registerTool("generate_settlement", {
   title: "Generate safe Xahau settlement",
   description: "For a value-moving dApp, generate the cluster-side Xahau payout code + the install of the trifecta's PROVEN agent_guardrail Hook (per-tx LIM + optional DST lock) on the cluster account + the exact `xahc prove` command. 'Safe by construction → proven safe' — the ledger enforces the spend cap even if the contract/signer is wrong.",
   inputSchema: {
-    template: z.enum(["escrow", "subscription", "payment_splitter"]),
+    template: z.enum(["escrow", "subscription", "payment_splitter", "streaming_payment", "multisig_treasury"]),
     limit_drops: z.number().int().nonnegative().describe("per-tx spend cap in drops (the LIM hook param)"),
     dest: z.string().optional().describe("optional r-address to LOCK payouts to (the DST hook param)"),
     cluster_account: z.string().optional().describe("the cluster's Xahau (multisig) account r-address"),
@@ -141,6 +150,24 @@ server.registerTool("recommend_hosts", {
     minSlots: min_slots, country, minRam: min_ram_mb, limit,
   })));
 
+server.registerTool("host_diagnostics", {
+  title: "Diagnose an Evernode host (live)",
+  description: "Health view of a single Evernode host by r-address: registration status, reputation, active/total instance slots, lease terms (rate/moments if available), and red-flags (low reputation, full capacity, stale/inactive). Fetches live from OnLedger (api.onledger.net, real-time from the Xahau registry) — or pass a `host` object to diagnose it. REAL data only: unknown fields are OMITTED (never invented); honest empty + note on not-found / fetch failure.",
+  inputSchema: {
+    address: z.string().optional().describe("the host's Xahau r-address to look up live on OnLedger"),
+    host: z.object({
+      address: z.string(), leaseAmount: z.number().optional(), leaseDrops: z.number().optional(),
+      availableInstances: z.number().optional(), maxInstances: z.number().optional(),
+      activeInstances: z.number().optional(), hostReputation: z.number().optional(),
+      ramMb: z.number().optional(), diskMb: z.number().optional(), countryCode: z.string().optional(),
+      version: z.string().optional(), lastHeartbeatLedger: z.number().optional(), flagged: z.number().optional(),
+    }).optional().describe("optional: diagnose this supplied host object instead of fetching live"),
+  },
+  outputSchema: HOST_DIAGNOSTICS_OUT,
+  // openWorldHint: true — like recommend_hosts, this may reach the live OnLedger endpoint.
+  annotations: { title: "Diagnose an Evernode host (live)", ...LIVE },
+}, async ({ address, host }) => ok(await hostDiagnostics({ address, host: host as HostRow | undefined })));
+
 server.registerTool("generate_deploy_commands", {
   title: "Generate deploy commands",
   description: "Generate the command sequence for: local (hpdevkit dev cluster), single (evdevkit acquire one host), cluster (evdevkit N-node cluster), or cluster-manager (connect to Offledger Cluster Manager).",
@@ -188,6 +215,29 @@ async function smoke() {
   checks.push(["checker suppresses sorted forEach + array stringify (no false-positive)", sorted.findings.length === 0]);
   checks.push(["lease math", estimateLease({ evrPerMoment: 2, moments: 24, nodes: 3 }).totalEVR === 144]);
   checks.push(["error explainer maps consensus", explainError("ledger not created, nodes disagree").matched === true]);
+  // v0.4.0: the 3 new templates are determinism-clean (covered by the listTemplates loop above)
+  // AND pass the new contract-API checker (correct hpc.init + ctx use + state persistence).
+  for (const t of ["oracle_consumer", "streaming_payment", "multisig_treasury"] as const) {
+    const f = generate(t).files["src/index.js"];
+    const api = checkContractApi(f).findings.filter((x) => x.severity === "high");
+    checks.push([`new template '${t}' has no HIGH contract-API finding`, api.length === 0]);
+  }
+  // contract-API checker: a good contract is clean; each misuse is flagged.
+  const goodApi = checkContractApi(generate("escrow").files["src/index.js"]);
+  checks.push(["contract-API checker: good contract is clean", goodApi.findings.length === 0]);
+  const badApi = checkContractApi("const t = Date.now(); ctx.users.read(inp); fs.writeFileSync('/tmp/x', 'y');");
+  checks.push(["contract-API checker flags missing init + fs-outside-state + missing-await-read",
+    ["missing-init", "fs-outside-state", "missing-await-read"].every((r) => badApi.findings.some((f) => f.rule === r))]);
+  // host_diagnostics: NO fabrication path — a supplied host with sparse fields omits unknowns,
+  // and an empty/no-input call is honest (found:false, never invents a host).
+  const diag = await hostDiagnostics({ host: { address: "rTest", hostReputation: 10, maxInstances: 3, activeInstances: 3 } });
+  checks.push(["host_diagnostics derives red-flags from real fields (low rep + full)",
+    diag.found === true && diag.redFlags.some((f) => /reputation/.test(f)) && diag.redFlags.some((f) => /capacity/.test(f))]);
+  checks.push(["host_diagnostics omits unknown fields (no lease/specs invented)",
+    diag.lease === undefined && diag.specs === undefined]);
+  const noDiag = await hostDiagnostics({});
+  checks.push(["host_diagnostics is honest with no input (found:false, no fabricated host)",
+    noDiag.found === false && !!noDiag.note]);
   const fail = checks.filter(([, ok]) => !ok);
   for (const [n, ok] of checks) console.log(`${ok ? "ok  " : "FAIL"} ${n}`);
   console.log(`\n${checks.length - fail.length}/${checks.length} passed`);

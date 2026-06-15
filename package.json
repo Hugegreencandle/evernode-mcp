@@ -1,6 +1,6 @@
 {
   "name": "evernode-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Evernode AI Builder — an MCP server that scaffolds, checks (determinism + Hook/WASM), costs, and deploys HotPocket dApps on Evernode/Xahau.",
   "type": "module",
   "bin": { "evernode-mcp": "dist/index.js" },

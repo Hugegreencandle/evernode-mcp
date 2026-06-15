@@ -38,6 +38,16 @@ export const CHECK_DETERMINISM_OUT = {
   summary: str,
 };
 
+// check_contract_api → { findings: ApiFinding[], summary: string }
+// ApiFinding = { line, column, snippet, rule, severity, why, fix }. HEURISTIC — `summary` says so.
+export const CHECK_CONTRACT_API_OUT = {
+  findings: z.array(z.object({
+    line: num, column: num, snippet: str, rule: str,
+    severity: str, why: str, fix: str,
+  }).passthrough()).optional(),
+  summary: str,
+};
+
 // recommend_pattern → { pattern: string, nodes: string, notes: string[] }
 export const RECOMMEND_PATTERN_OUT = { pattern: str, nodes: str, notes: arr };
 
@@ -62,6 +72,14 @@ export const ESTIMATE_LEASE_OUT = {
 // REAL data only — `ranked` is empty + `note` explains on failure; nothing is fabricated.
 export const RECOMMEND_HOSTS_OUT = {
   mode: str, ranked: arr, prefer: str, note: str, source: str, query: str,
+};
+
+// host_diagnostics → { found, address, source, note?, registration?, reputation?, slots?, lease?, specs?, redFlags }
+// REAL data only — unknown fields are OMITTED (never invented); not-found/failure → found:false + note.
+export const HOST_DIAGNOSTICS_OUT = {
+  found: bool, address: str, source: str, note: str,
+  registration: obj, reputation: num, slots: obj, lease: obj, specs: obj,
+  redFlags: z.array(z.string()).optional(),
 };
 
 // generate_deploy_commands → { steps: string[], notes: string[] }
