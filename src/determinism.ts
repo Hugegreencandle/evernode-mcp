@@ -205,9 +205,16 @@ const RULES: Rule[] = [
     why: "Outbound network calls return different results/timing per node (and may fail on some) — non-deterministic and side-effectful inside consensus.",
     fix: "Do NOT call the network from contract logic. Bring external data in as a consensused USER INPUT, or via an oracle pattern where nodes agree on the value through NPL before acting." },
   { id: "node-env",
-    re: /\bprocess\.env\b|\bprocess\.pid\b|\bos\.(hostname|networkInterfaces|cpus|freemem|loadavg|uptime|userInfo|platform|arch|tmpdir|endianness)\s*\(/,
+    // `process.env`/`process.pid` plus the idiomatic bare `process.*` host reads — `process.platform`/
+    // `process.arch` (host CPU/OS), `process.cwd()`/`process.uptime()`/`process.memoryUsage()` (per-node
+    // runtime state), `process.argv`/`process.ppid`/`process.getuid()`/`process.getgid()`/`process.title`
+    // (per-invocation/per-process), and `process.version(s)` (host node build). A `\b` boundary matches
+    // BOTH the property form (`process.platform`) and the call form (`process.cwd()`). `process.hrtime`
+    // is deliberately NOT here — it's a clock and is owned by the `wall-clock-time` rule above. Plus the
+    // `os.*` host-stat functions.
+    re: /\bprocess\.env\b|\bprocess\.(?:pid|ppid|platform|arch|argv|cwd|uptime|memoryUsage|getuid|getgid|title|version|versions)\b|\bos\.(hostname|networkInterfaces|cpus|freemem|loadavg|uptime|userInfo|platform|arch|tmpdir|endianness)\s*\(/,
     severity: "high",
-    why: "Per-node environment (env vars, pid, hostname, machine stats) differs between hosts in the cluster.",
+    why: "Per-node environment (env vars, pid, platform/arch, cwd, uptime, memory, argv, hostname, machine stats) differs between hosts in the cluster.",
     fix: "Keep contract behavior independent of the host environment. Pass any needed config in via the consensused contract state or inputs, not process/os." },
   { id: "timers", re: /\b(setTimeout|setInterval|setImmediate)\s*\(/,
     severity: "medium",

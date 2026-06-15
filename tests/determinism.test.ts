@@ -47,6 +47,57 @@ describe("determinism checker", () => {
     }
   });
 
+  // Regression for the HIGH audit finding (2026-06-15): the idiomatic bare `process.*` host reads
+  // (`process.platform`/`arch`/`cwd()`/`uptime()`/`memoryUsage()`/`argv`, plus ppid/getuid/getgid/
+  // title/version(s)) were silently CLEAN — a consensus-breaking false-negative. They must all be
+  // flagged HIGH by node-env now.
+  it("flags bare process.* host reads as HIGH node-env (audit 2026-06-15)", () => {
+    const srcs = [
+      "if (process.platform === 'linux') {}",
+      "const a = process.arch;",
+      "const c = process.cwd();",
+      "const u = process.uptime();",
+      "const m = process.memoryUsage();",
+      "const v = process.argv[0];",
+      "const p = process.ppid;",
+      "const uid = process.getuid();",
+      "const gid = process.getgid();",
+      "const t = process.title;",
+      "const ver = process.version;",
+      "const vers = process.versions.node;",
+    ];
+    for (const src of srcs) {
+      const { findings } = checkDeterminism(src);
+      expect(findings.some((f) => f.rule === "node-env" && f.severity === "high"),
+        `expected node-env@high for: ${src}, got ${JSON.stringify(findings.map((f) => f.rule + "@" + f.severity))}`).toBe(true);
+    }
+  });
+
+  // process.hrtime is a CLOCK — it stays owned by wall-clock-time, NOT node-env (no double-claim).
+  it("process.hrtime stays wall-clock-time, not node-env", () => {
+    const { findings } = checkDeterminism("const h = process.hrtime();");
+    expect(findings.some((f) => f.rule === "wall-clock-time" && f.severity === "high")).toBe(true);
+    expect(findings.some((f) => f.rule === "node-env")).toBe(false);
+  });
+
+  // Guard against over-broad matching: a local identifier merely NAMED like one of these tokens,
+  // or a member access on some other object, must NOT trip node-env.
+  it("does NOT flag local vars / unrelated members named like process fields (no false positive)", () => {
+    const safe = [
+      "const platform = 'web'; const arch = 'x64';",
+      "const argv = ['a']; const title = 'hi';",
+      "const cwd = getCwd(); const uptime = 5;",
+      "config.platform = 'web'; settings.arch = 'arm';",
+      "const v = pkg.version; user.title = 'dev';",
+      "myProcess.platform; theprocess.arch;",
+    ];
+    for (const src of safe) {
+      const { findings } = checkDeterminism(src);
+      expect(findings.some((f) => f.rule === "node-env"),
+        `unexpected node-env false positive for: ${src}`).toBe(false);
+    }
+  });
+
   it("flags Object.keys/values/entries iteration as low (iteration-order)", () => {
     for (const call of ["Object.keys(obj)", "Object.values(obj)", "Object.entries(obj)"]) {
       const { findings } = checkDeterminism(`const xs = ${call};\nfor (const x of xs) {}`);
