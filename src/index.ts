@@ -15,7 +15,7 @@ import {
   DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT,
 } from "./outputSchemas.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 // Every tool returns the human-readable JSON text AND validated structuredContent. The object we
 // return IS the structured payload (these tools never throw their own error result — handler
@@ -31,6 +31,9 @@ const ok = (v: object) => ({
 const OFFLINE = { readOnlyHint: true, openWorldHint: false, idempotentHint: true } as const;
 const LIVE = { readOnlyHint: true, openWorldHint: true, idempotentHint: true } as const;
 
+// Build + register every tool on a fresh server. Exported (not auto-connected) so tests can drive
+// the real registered handlers over an in-memory transport without starting the stdio server.
+export function createServer(): McpServer {
 const server = new McpServer({ name: "evernode-mcp", version: VERSION });
 
 server.registerTool("list_templates", {
@@ -158,6 +161,9 @@ server.registerTool("explain_error", {
   annotations: { title: "Explain an Evernode/HotPocket error", ...OFFLINE },
 }, async ({ error_text }) => ok(explainError(error_text)));
 
+  return server;
+}
+
 // --- smoke self-test (no MCP client needed): `node dist/index.js --smoke` ------
 async function smoke() {
   const checks: [string, boolean][] = [];
@@ -173,6 +179,13 @@ async function smoke() {
   }
   const bad = checkDeterminism("const t = Date.now(); const r = Math.random(); await fetch('http://x');");
   checks.push(["checker flags Date.now/Math.random/fetch", bad.findings.filter((f) => f.severity === "high").length >= 3]);
+  // v0.3.0 coverage: the named gaps (aliased Map/Set, spread/Array.from, forEach, JSON.stringify)
+  const alias = checkDeterminism("const m = new Map();\nfor (const x of m) {}");
+  checks.push(["checker flags aliased Map iteration", alias.findings.some((f) => f.rule === "iteration-order-alias")]);
+  const jstr = checkDeterminism("const out = JSON.stringify(state);");
+  checks.push(["checker flags JSON.stringify of an unordered object", jstr.findings.some((f) => f.rule === "json-stringify-unordered")]);
+  const sorted = checkDeterminism("Object.keys(o).sort().forEach(f);\nJSON.stringify([1, 2, 3]);\nconst n = ctx.lclSeqNo;");
+  checks.push(["checker suppresses sorted forEach + array stringify (no false-positive)", sorted.findings.length === 0]);
   checks.push(["lease math", estimateLease({ evrPerMoment: 2, moments: 24, nodes: 3 }).totalEVR === 144]);
   checks.push(["error explainer maps consensus", explainError("ledger not created, nodes disagree").matched === true]);
   const fail = checks.filter(([, ok]) => !ok);
@@ -185,6 +198,6 @@ if (process.argv.includes("--smoke")) {
   smoke();
 } else {
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await createServer().connect(transport);
   console.error(`evernode-mcp ${VERSION} on stdio`);
 }
