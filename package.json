@@ -1,0 +1,28 @@
+{
+  "name": "evernode-mcp",
+  "version": "0.1.0",
+  "description": "Evernode AI Builder — an MCP server that scaffolds, checks (determinism + Hook/WASM), costs, and deploys HotPocket dApps on Evernode/Xahau.",
+  "type": "module",
+  "bin": { "evernode-mcp": "dist/index.js" },
+  "main": "dist/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "smoke": "node dist/index.js --smoke",
+    "test": "tsc && vitest run",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3",
+    "vitest": "2.1.8",
+    "@types/node": "22.10.2"
+  },
+  "license": "MIT",
+  "author": "Dane Brown",
+  "repository": { "type": "git", "url": "git+https://github.com/Hugegreencandle/evernode-mcp.git" }
+}
