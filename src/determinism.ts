@@ -34,9 +34,10 @@ interface Rule {
   severity: Severity;
   why: string;
   fix: string;
-  // optional: given the stripped line + the regex match, return true to SUPPRESS the finding
-  // (a provably-deterministic use). Heuristic only — used to avoid flagging sorted iteration.
-  suppress?: (line: string, m: RegExpExecArray) => boolean;
+  // optional: given the stripped line + the regex match (+ the full stripped-line array and the
+  // line index for multi-line lookahead), return true to SUPPRESS the finding (a provably-
+  // deterministic use). Heuristic only — used to avoid flagging sorted iteration / canonicalization.
+  suppress?: (line: string, m: RegExpExecArray, lines?: string[], idx?: number) => boolean;
 }
 
 // True when an `Object.keys|values|entries(...)` match is immediately followed by `.sort(`
@@ -96,7 +97,7 @@ function materializeIsSorted(line: string, m: RegExpExecArray): boolean {
 
 // Heuristic safety check for JSON.stringify(...). We SUPPRESS only when we can see the order is
 // pinned or irrelevant; anything we can't classify falls through to a (low) finding — never silent.
-function jsonStringifyIsSafe(line: string, m: RegExpExecArray): boolean {
+function jsonStringifyIsSafe(line: string, m: RegExpExecArray, lines?: string[], idx?: number): boolean {
   // index of the '(' that opens the stringify call
   let i = m.index + m[0].length - 1;
   if (line[i] !== "(") { i = line.indexOf("(", m.index); if (i === -1) return false; }
@@ -107,7 +108,21 @@ function jsonStringifyIsSafe(line: string, m: RegExpExecArray): boolean {
     if (c === "(") depth++;
     else if (c === ")") { depth--; if (depth === 0) { end = j; break; } }
   }
-  const args = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
+  let args = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
+  // MULTI-LINE call (the `(` didn't close on this line): the argument — and any explicit
+  // `.sort(...)` canonicalization — continues on the next lines. The per-line view would miss it
+  // and FALSE-POSITIVE a `JSON.stringify(\n  Object.keys(v).sort().map(...)\n)` canonicalizer
+  // (real-world FP, Arena Vanguard 2026-06-18). Gather forward until the parens balance (capped),
+  // so the safe-checks below see the whole argument. Only ADDS suppression — never a false-negative.
+  if (end === -1 && lines && idx !== undefined) {
+    let d = 0; const parts: string[] = [];
+    outer: for (let li = idx; li < Math.min(lines.length, idx + 12); li++) {
+      const seg = li === idx ? lines[li].slice(i) : lines[li];
+      for (const c of seg) { if (c === "(") d++; else if (c === ")") { d--; if (d === 0) break outer; } }
+      parts.push(seg);
+    }
+    args = parts.join(" ").replace(/^[^(]*\(/, "");  // drop up to the opening '('
+  }
   const first = args.trimStart();
   // Safe: stringifying an ARRAY literal (array order is preserved, deterministic).
   if (first.startsWith("[")) return true;
@@ -203,7 +218,7 @@ const RULES: Rule[] = [
   { id: "network-io", re: /\b(fetch|axios|got|node-fetch)\s*\(|require\(['"](https?|node:https?|net|dns|node:net|node:dns)['"]\)|from\s+['"](https?|node:https?|net|dns)['"]/,
     severity: "high",
     why: "Outbound network calls return different results/timing per node (and may fail on some) — non-deterministic and side-effectful inside consensus.",
-    fix: "Do NOT call the network from contract logic. Bring external data in as a consensused USER INPUT, or via an oracle pattern where nodes agree on the value through NPL before acting." },
+    fix: "Do NOT call the network from contract logic. Bring external data in as a consensused USER INPUT, or via an oracle pattern where nodes agree on the value through NPL before acting. (If this file is your HTTP/wrapper surface OUTSIDE the consensus kernel — a createServer/http import for the operator API — this is expected; scope the scan to the deterministic kernel, not the wrapper.)" },
   { id: "node-env",
     // `process.env`/`process.pid` plus the idiomatic bare `process.*` host reads — `process.platform`/
     // `process.arch` (host CPU/OS), `process.cwd()`/`process.uptime()`/`process.memoryUsage()` (per-node
@@ -215,7 +230,7 @@ const RULES: Rule[] = [
     re: /\bprocess\.env\b|\bprocess\.(?:pid|ppid|platform|arch|argv|cwd|uptime|memoryUsage|getuid|getgid|title|version|versions)\b|\bos\.(hostname|networkInterfaces|cpus|freemem|loadavg|uptime|userInfo|platform|arch|tmpdir|endianness)\s*\(/,
     severity: "high",
     why: "Per-node environment (env vars, pid, platform/arch, cwd, uptime, memory, argv, hostname, machine stats) differs between hosts in the cluster.",
-    fix: "Keep contract behavior independent of the host environment. Pass any needed config in via the consensused contract state or inputs, not process/os." },
+    fix: "Keep contract behavior independent of the host environment. Pass any needed config in via the consensused contract state or inputs, not process/os. (If this file is wrapper/runtime config OUTSIDE the consensus kernel — path setup, operator tooling — `process.env`/`process.cwd()` are fine there; scope the scan to the deterministic kernel.)" },
   { id: "timers", re: /\b(setTimeout|setInterval|setImmediate)\s*\(/,
     severity: "medium",
     why: "Timer firing order/timing isn't consensused; relying on it for state changes diverges across nodes.",
@@ -262,7 +277,7 @@ const RULES: Rule[] = [
     // Suppress the most common provably-safe shapes: stringifying a primitive/array literal, a
     // freshly-built object literal on the same line (its key order is lexically fixed), or a call
     // that already passes a replacer array as the 2nd arg.
-    suppress: (line, m) => jsonStringifyIsSafe(line, m) },
+    suppress: (line, m, lines, idx) => jsonStringifyIsSafe(line, m, lines, idx) },
   // Locale / ICU / timezone formatting + collation. The result depends on the host's installed
   // locale + ICU data + (for time) timezone — all of which vary node-to-node. A consensus breaker
   // any time the formatted/compared value feeds state or output (and the scanner can't tell that it
@@ -351,7 +366,7 @@ export function checkDeterminism(source: string): { findings: Finding[]; summary
     for (const rule of RULES) {
       const m = rule.re.exec(line);
       if (m) {
-        if (rule.suppress && rule.suppress(line, m)) continue;
+        if (rule.suppress && rule.suppress(line, m, stripped, idx)) continue;
         findings.push({
           line: idx + 1,
           column: (m.index ?? 0) + 1,

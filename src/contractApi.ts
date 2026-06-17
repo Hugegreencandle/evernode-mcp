@@ -117,6 +117,17 @@ function structuralChecks(src: string): ApiFinding[] {
   const out: ApiFinding[] = [];
   const code = src.split(/\r?\n/).map(stripLineComment).join("\n");
 
+  // SCOPE GUARD (FP fix, Arena Vanguard 2026-06-18): the structural checks below assert that the
+  // file IS a HotPocket contract entrypoint. Running them on a WRAPPER / runtime / config module
+  // (the HTTP surface, path setup, etc. — outside the consensus kernel) false-positives
+  // "missing-init" / "ignores-ctx" on code that was never meant to be the contract. Only assert
+  // these when the file shows a HotPocket signal (imports the contract lib, references HotPocket /
+  // hpc / ctx). With NO such signal it's almost certainly not the contract file -> skip the
+  // structural checks (the determinism + line-level API checks still run regardless).
+  const hasHotPocketSignal =
+    /hotpocket-nodejs-contract|\bHotPocket\b|\bhpc\b|\bctx\.(?:lclSeqNo|users|npl|unl|contractId|publicKey|readonly)\b/.test(code);
+  if (!hasHotPocketSignal) return out;
+
   // 1) Must register an entry point: `hpc.init(...)` (or `<x>.init(...)` on a HotPocket.Contract()).
   const hasContractCtor = /\bnew\s+HotPocket\.Contract\s*\(/.test(code);
   const hasInit = /\.\s*init\s*\(/.test(code);
