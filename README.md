@@ -19,13 +19,14 @@ Cluster Manager rather than replacing its orchestration.
 
 ## Where it fits — the layer-2 companion to the Hooks trifecta
 
-The Hooks trifecta secures *layer-1* Hooks — **write → simulate one tx → prove all inputs**:
+The Hooks pipeline secures *layer-1* Hooks — **write → simulate one tx → prove all inputs → watch live**:
 
 | stage | tool | what it does |
 |---|---|---|
 | **write** | [xahc](https://github.com/Hugegreencandle/xahc) | author + compile a safe Hook to clean, lint-passed WASM |
 | **simulate one** | [xahau-mcp](https://github.com/Hugegreencandle/xahau-mcp) | run the real bytecode against one live transaction |
 | **prove all** | [xahc-prover](https://github.com/Hugegreencandle/xahc-prover) | prove an invariant holds for every input in scope — or return the counterexample |
+| **watch live** | [xahc-watch](https://github.com/Hugegreencandle/xahc-prover/tree/main/src/watch) | bind a proof to the deployed hook and continuously attest it (alerts on a `SetHook` swap or a live verdict break) |
 
 **evernode-mcp** is the *layer-2* companion: it builds the **HotPocket dApps** that run on
 Evernode hosts. Whenever a dApp settles value on Xahau through a Hook-guarded account, it hands
