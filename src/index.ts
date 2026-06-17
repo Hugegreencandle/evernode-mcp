@@ -226,6 +226,27 @@ async function smoke() {
   const jsf2 = checkDeterminism("JSON.stringify(unsortedObj, keys.sort());");
   checks.push(["FN-guard JSF-2: unrelated 2nd-arg sort with unsorted 1st arg still FLAGS json-stringify",
     jsf2.findings.some((f) => f.rule === "json-stringify-unordered")]);
+  // 2nd-round audit guards (regex-aware neutralize + fail-toward-flag + sorted-replacer):
+  // AUDIT-2: a `)` inside a string/regex on a single-line stringify must NOT balance early + suppress
+  // a spread object -> must FLAG.
+  const a2tpl = checkDeterminism("JSON.stringify({ k: `a)`, ...rest });");
+  const a2rgx = checkDeterminism("JSON.stringify({ k: /)/, ...rest });");
+  checks.push(["FN-guard AUDIT-2: )-in-string/regex + spread object still FLAGS",
+    a2tpl.findings.some((f) => f.rule === "json-stringify-unordered") &&
+    a2rgx.findings.some((f) => f.rule === "json-stringify-unordered")]);
+  // FN-REGEX: a regex in the FIRST arg must not break the arg-split; here the 2nd arg IS a sorted-key
+  // array replacer (which provably pins output order — verified), so it is correctly SUPPRESSED.
+  const fnrgx = checkDeterminism("JSON.stringify(/]/.test(x) ? a : b, Object.keys(b).sort())");
+  checks.push(["regex-in-arg1 + sorted-array replacer 2nd arg suppresses (deterministic, no false-positive)",
+    fnrgx.findings.filter((f) => f.rule === "json-stringify-unordered").length === 0]);
+  // self-flag FP: the tool's OWN recommended fix (sorted-array replacer) must NOT be flagged.
+  const repl = checkDeterminism("JSON.stringify(obj, Object.keys(obj).sort())");
+  checks.push(["recommended sorted-array replacer is not self-flagged (no false-positive)",
+    repl.findings.filter((f) => f.rule === "json-stringify-unordered").length === 0]);
+  // ...but a sort in the SPACE (3rd) arg does NOT pin order -> must still FLAG.
+  const spc = checkDeterminism("JSON.stringify(unsortedObj, null, indent(arr.sort()))");
+  checks.push(["FN-guard: sort in the 3rd/space arg (not a replacer) still FLAGS",
+    spc.findings.some((f) => f.rule === "json-stringify-unordered")]);
   // v0.5.0 coverage: locale/timezone, floating-point, member-expression iteration (each must FIRE).
   const loc = checkDeterminism("const s = n.toLocaleString();\narr.sort((a, b) => a.localeCompare(b));");
   checks.push(["checker flags locale/timezone (toLocaleString + localeCompare)", loc.findings.filter((f) => f.rule === "locale-timezone").length >= 2]);

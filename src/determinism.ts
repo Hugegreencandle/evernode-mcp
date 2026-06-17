@@ -101,86 +101,108 @@ function jsonStringifyIsSafe(line: string, m: RegExpExecArray, lines?: string[],
   // index of the '(' that opens the stringify call
   let i = m.index + m[0].length - 1;
   if (line[i] !== "(") { i = line.indexOf("(", m.index); if (i === -1) return false; }
-  // grab the argument substring up to the balanced close (best-effort, single line)
+  // Find the argument substring up to the BALANCED close. We count parens on NEUTRALIZED text
+  // (string/template/regex contents blanked) so a `(`/`)` inside a literal can't throw the balance
+  // off. THE INVARIANT (closes audits JSF-1/JSF-2/AUDIT-2/FN-REGEX): suppression only ever happens
+  // on a CLEANLY-BALANCED, fully-parsed argument. Any ambiguity — unbalanced single line, a
+  // multi-line gather that never balances, or an arg-split that can't resolve — FAILS TOWARD
+  // FLAGGING (never a silent suppress, which would be a false-negative, the lint's cardinal sin).
+  const nline = neutralizeStrings(line);
   let depth = 0, end = -1;
-  for (let j = i; j < line.length; j++) {
-    const c = line[j];
-    if (c === "(") depth++;
-    else if (c === ")") { depth--; if (depth === 0) { end = j; break; } }
+  for (let j = i; j < nline.length; j++) {
+    if (nline[j] === "(") depth++;
+    else if (nline[j] === ")") { depth--; if (depth === 0) { end = j; break; } }
   }
-  let args = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
-  // MULTI-LINE call (the `(` didn't close on this line): the argument continues on later lines, so a
-  // legit `JSON.stringify(\n Object.keys(v).sort().map(...)\n)` canonicalizer would FALSE-POSITIVE
-  // on the per-line view (real-world FP, Arena Vanguard 2026-06-18). Gather forward until the parens
-  // BALANCE — but count parens on STRING-NEUTRALIZED text so a stray `(` inside a string/regex can't
-  // throw the balance off and walk into following statements, and ONLY trust the gather if it
-  // actually balanced inside the window. If it never balances, leave `args` as the single line so we
-  // FAIL TOWARD FLAGGING (never silently suppress on an unbalanced/ambiguous parse). [audit JSF-1]
+  let args: string | null = end === -1 ? null : line.slice(i + 1, end);
+
   if (end === -1 && lines && idx !== undefined) {
-    let d = 0, balanced = false; const parts: string[] = [];
-    outer: for (let li = idx; li < Math.min(lines.length, idx + 12); li++) {
-      const seg = li === idx ? lines[li].slice(i) : lines[li];
-      parts.push(seg);
-      for (const c of neutralizeStrings(seg)) {
-        if (c === "(") d++;
-        else if (c === ")") { d--; if (d === 0) { balanced = true; break outer; } }
-      }
+    // MULTI-LINE call: join a window from the opening `(` forward, neutralize (handles strings/
+    // template literals/regex spanning lines), and find the MATCHING close paren — then slice the
+    // inner argument BETWEEN the parens (exclude both). If it never balances -> args stays null ->
+    // flag. (Excluding the trailing `)` matters: leaving it in makes topLevelArgs see depth<0.)
+    const window = [lines[idx].slice(i), ...lines.slice(idx + 1, idx + 12)].join("\n");
+    const nwin = neutralizeStrings(window);   // window[0] is the opening '('
+    let d = 0;
+    for (let j = 0; j < nwin.length; j++) {
+      if (nwin[j] === "(") d++;
+      else if (nwin[j] === ")") { d--; if (d === 0) { args = window.slice(1, j); break; } }
     }
-    if (balanced) args = parts.join(" ").replace(/^[^(]*\(/, "");  // drop up to the opening '('
   }
-  const first = args.trimStart();
-  // Safe: stringifying an ARRAY literal (array order is preserved, deterministic).
+  if (args === null) return false;   // could not cleanly parse the argument -> FLAG (no false-negative)
+
+  // Split into top-level args (null if the arg list itself doesn't parse cleanly -> flag).
+  const argv = topLevelArgs(args);
+  if (argv === null) return false;
+  const first = (argv[0] ?? "").trimStart();
+
+  // Safe: ARRAY literal first arg (array order is preserved).
   if (first.startsWith("[")) return true;
-  // Safe: stringifying a primitive literal (string/number/boolean/template).
+  // Safe: a primitive literal (string/number/boolean/template/null).
   if (/^["'`]/.test(first) || /^-?\d/.test(first) || /^(true|false|null)\b/.test(first)) return true;
-  // Safe: an OBJECT LITERAL `{ a: x, b: y }` — its key order is fixed lexically (same on every node),
-  // UNLESS it splices keys in via a spread `...x` (then the injected keys follow the spread source's
-  // order, which may not be consensused — so a literal containing `...` is NOT auto-safe).
-  if (first.startsWith("{") && !/\.\.\./.test(args)) return true;
-  // Safe: a replacer ARRAY is passed as the 2nd arg — keys are explicitly pinned + ordered.
-  // crude top-level comma split (good enough; misses nested commas but only ADDS findings if wrong).
-  if (/,\s*\[/.test(args)) return true;
-  // Safe: the SERIALIZED VALUE itself is canonicalized via `.sort(` — but ONLY when the sort is in
-  // the FIRST argument (not a 2nd-arg/unrelated sort) and the first arg has no spread `...` (a spread
-  // re-injects keys in a non-consensused order). [audit JSF-2/OS-1: a `.sort(` ANYWHERE in the arg
-  // was over-suppressing an unrelated sort.] firstArg = up to the first top-level comma.
-  const firstArg = topLevelFirstArg(args);
-  if (/\.sort\s*\(/.test(firstArg) && !/\.\.\./.test(firstArg)) return true;
-  // Otherwise: a bare object identifier, a spread/merge, or a `{...}` with a spread — key order
-  // isn't provably consensused. FLAG (low) rather than risk a silent miss.
+  // Safe: an OBJECT LITERAL whose key order is lexically fixed — UNLESS it splices a spread `...`.
+  if (first.startsWith("{") && !/\.\.\./.test(first)) return true;
+  // Safe: the SERIALIZED VALUE is canonicalized — a `.sort(` in the FIRST arg, no spread. [JSF-2]
+  if (/\.sort\s*\(/.test(first) && !/\.\.\./.test(first)) return true;
+  // Safe: a sorted-key-array REPLACER as the 2nd arg pins output order. This is the tool's OWN
+  // recommended fix shape, so it must NOT self-flag [audit FP-RECOMMENDED-FIX-SELF-FLAG]. Accept a
+  // literal `[...]` replacer or a sorted key array (`Object.keys/entries(...).sort()` / `[...].sort()`).
+  // Only the 2nd positional arg counts — a sort in the 3rd (space) arg does NOT pin order.
+  const arg2 = (argv[1] ?? "").trim();
+  if (arg2.startsWith("[")) return true;
+  if (/\.sort\s*\(/.test(arg2) && /(Object\.(keys|entries)\s*\(|^\[)/.test(arg2)) return true;
+  // Otherwise: order isn't provably consensused -> FLAG (low) rather than risk a silent miss.
   return false;
 }
 
-// Blank out string/template/regex-literal CONTENTS (keep length/structure) so a `(` or `)` inside a
-// literal is not miscounted when balancing parens. Best-effort single-pass quote tracker; regex is
-// approximated (treat `/.../ ` like a string when it follows a non-value char). Conservative: when
-// unsure we leave chars in place (counting them only risks NOT suppressing = fail-toward-flag).
+// Blank string / template / REGEX literal CONTENTS (keep length/structure) so a `(`/`)`/`[`/`]` inside
+// a literal is not miscounted when balancing. Regex disambiguation: a `/` starts a regex only in a
+// "non-value" position (after an operator / `(` / `,` / `=` / `:` / `[` / `{` / `;` / `return` etc.),
+// otherwise it's division. Conservative + fail-safe: if we ever mis-classify, the worst case is an
+// unbalanced parse, which the caller treats as "cannot prove" -> FLAG (never a false-negative).
 function neutralizeStrings(s: string): string {
-  let out = "", q: string | null = null;
+  let out = "", q: string | null = null, inRegex = false, prevSig = "";
   for (let k = 0; k < s.length; k++) {
     const c = s[k];
-    if (q) {
-      if (c === "\\") { out += "  "; k++; continue; }   // skip escaped char
+    if (q) {                                   // inside a string/template literal
+      if (c === "\\") { out += "  "; k++; continue; }
       out += c === q ? c : " ";
       if (c === q) q = null;
-    } else if (c === '"' || c === "'" || c === "`") { q = c; out += c; }
-    else out += c;
+    } else if (inRegex) {                       // inside a /regex/ literal
+      if (c === "\\") { out += "  "; k++; continue; }
+      out += c === "/" ? c : " ";
+      if (c === "/") inRegex = false;
+    } else if (c === '"' || c === "'" || c === "`") { q = c; out += c; prevSig = c; }
+    else if (c === "/" && s[k + 1] !== "/" && s[k + 1] !== "*" && isRegexStart(prevSig)) {
+      inRegex = true; out += c;                 // open a regex literal
+    } else { out += c; if (c.trim()) prevSig = c; }
   }
   return out;
 }
 
-// The first top-level argument of a call's gathered arg string (up to the first comma at paren/
-// bracket/brace depth 0), on string-neutralized text. Used to scope the `.sort(` safe-check.
-function topLevelFirstArg(args: string): string {
+// Is a `/` at a position preceded by `prev` (last significant char) the start of a regex literal
+// (vs a division operator)? Regex follows an operator/opening-bracket/comma/start — NOT an
+// identifier char, number, `)`, or `]` (those are values that `/` would divide).
+function isRegexStart(prev: string): boolean {
+  if (prev === "") return true;                 // start of segment
+  return !/[A-Za-z0-9_$)\]]/.test(prev);
+}
+
+// Split a call's argument string into TOP-LEVEL args (commas at paren/bracket/brace depth 0), over
+// neutralized text. Returns null if the bracketing is unbalanced (depth ever negative, or != 0 at
+// end) — the caller treats null as "cannot prove" and FLAGS. [closes the FN-REGEX-FIRSTARG leak]
+function topLevelArgs(args: string): string[] | null {
   const n = neutralizeStrings(args);
-  let depth = 0;
+  const out: string[] = [];
+  let depth = 0, start = 0;
   for (let k = 0; k < n.length; k++) {
     const c = n[k];
     if (c === "(" || c === "[" || c === "{") depth++;
-    else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === "," && depth === 0) return args.slice(0, k);
+    else if (c === ")" || c === "]" || c === "}") { depth--; if (depth < 0) return null; }
+    else if (c === "," && depth === 0) { out.push(args.slice(start, k)); start = k + 1; }
   }
-  return args;
+  if (depth !== 0) return null;
+  out.push(args.slice(start));
+  return out;
 }
 
 // ---- cross-line alias pass: Map/Set reached through a variable OR a member --------------------
