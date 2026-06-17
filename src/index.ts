@@ -213,6 +213,19 @@ async function smoke() {
   checks.push(["checker flags JSON.stringify of an unordered object", jstr.findings.some((f) => f.rule === "json-stringify-unordered")]);
   const sorted = checkDeterminism("Object.keys(o).sort().forEach(f);\nJSON.stringify([1, 2, 3]);\nconst n = ctx.lclSeqNo;");
   checks.push(["checker suppresses sorted forEach + array stringify (no false-positive)", sorted.findings.length === 0]);
+  // FP fix (Arena Vanguard): a MULTI-LINE sorted-keys canonicalizer must be SUPPRESSED...
+  const mlSorted = checkDeterminism("return JSON.stringify(\n  Object.keys(value).sort().map((k) => [k, value[k]])\n);");
+  checks.push(["checker suppresses multi-line sorted-keys JSON.stringify canonicalizer (no false-positive)",
+    mlSorted.findings.filter((f) => f.rule === "json-stringify-unordered").length === 0]);
+  // ...but the audit FALSE-NEGATIVE (JSF-1) must NOT recur: a stray `(` in a string on the call line
+  // + an unrelated later `.sort()` must STILL flag (the gather must not walk into following statements).
+  const jsf1 = checkDeterminism('const out = JSON.stringify(state, label("("))\n;\nconst ranked = rows.sort((a, b) => a.s - b.s);');
+  checks.push(["FN-guard JSF-1: stray-paren-in-string + unrelated later sort still FLAGS json-stringify",
+    jsf1.findings.some((f) => f.rule === "json-stringify-unordered")]);
+  // ...and the audit FALSE-NEGATIVE (JSF-2): an unrelated sort in a non-first argument must STILL flag.
+  const jsf2 = checkDeterminism("JSON.stringify(unsortedObj, keys.sort());");
+  checks.push(["FN-guard JSF-2: unrelated 2nd-arg sort with unsorted 1st arg still FLAGS json-stringify",
+    jsf2.findings.some((f) => f.rule === "json-stringify-unordered")]);
   // v0.5.0 coverage: locale/timezone, floating-point, member-expression iteration (each must FIRE).
   const loc = checkDeterminism("const s = n.toLocaleString();\narr.sort((a, b) => a.localeCompare(b));");
   checks.push(["checker flags locale/timezone (toLocaleString + localeCompare)", loc.findings.filter((f) => f.rule === "locale-timezone").length >= 2]);
@@ -235,6 +248,12 @@ async function smoke() {
   // contract-API checker: a good contract is clean; each misuse is flagged.
   const goodApi = checkContractApi(generate("escrow").files["src/index.js"]);
   checks.push(["contract-API checker: good contract is clean", goodApi.findings.length === 0]);
+  // FN-guard FN-1 (Arena Vanguard audit): a real contract that lacks the HotPocket signal words
+  // (local re-export import + destructured ctx) and FORGETS init must STILL flag missing-init — the
+  // scope guard must not silently skip it.
+  const sigless = checkContractApi('import { Contract as C } from "./bundle.js";\nasync function fn({ users }) { await users.list(); }');
+  checks.push(["FN-guard FN-1: signal-less contract missing init still FLAGS missing-init",
+    sigless.findings.some((f) => f.rule === "missing-init")]);
   const badApi = checkContractApi("const t = Date.now(); ctx.users.read(inp); fs.writeFileSync('/tmp/x', 'y');");
   checks.push(["contract-API checker flags missing init + fs-outside-state + missing-await-read",
     ["missing-init", "fs-outside-state", "missing-await-read"].every((r) => badApi.findings.some((f) => f.rule === r))]);
