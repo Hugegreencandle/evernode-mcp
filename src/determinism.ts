@@ -109,19 +109,24 @@ function jsonStringifyIsSafe(line: string, m: RegExpExecArray, lines?: string[],
     else if (c === ")") { depth--; if (depth === 0) { end = j; break; } }
   }
   let args = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
-  // MULTI-LINE call (the `(` didn't close on this line): the argument — and any explicit
-  // `.sort(...)` canonicalization — continues on the next lines. The per-line view would miss it
-  // and FALSE-POSITIVE a `JSON.stringify(\n  Object.keys(v).sort().map(...)\n)` canonicalizer
-  // (real-world FP, Arena Vanguard 2026-06-18). Gather forward until the parens balance (capped),
-  // so the safe-checks below see the whole argument. Only ADDS suppression — never a false-negative.
+  // MULTI-LINE call (the `(` didn't close on this line): the argument continues on later lines, so a
+  // legit `JSON.stringify(\n Object.keys(v).sort().map(...)\n)` canonicalizer would FALSE-POSITIVE
+  // on the per-line view (real-world FP, Arena Vanguard 2026-06-18). Gather forward until the parens
+  // BALANCE — but count parens on STRING-NEUTRALIZED text so a stray `(` inside a string/regex can't
+  // throw the balance off and walk into following statements, and ONLY trust the gather if it
+  // actually balanced inside the window. If it never balances, leave `args` as the single line so we
+  // FAIL TOWARD FLAGGING (never silently suppress on an unbalanced/ambiguous parse). [audit JSF-1]
   if (end === -1 && lines && idx !== undefined) {
-    let d = 0; const parts: string[] = [];
+    let d = 0, balanced = false; const parts: string[] = [];
     outer: for (let li = idx; li < Math.min(lines.length, idx + 12); li++) {
       const seg = li === idx ? lines[li].slice(i) : lines[li];
-      for (const c of seg) { if (c === "(") d++; else if (c === ")") { d--; if (d === 0) break outer; } }
       parts.push(seg);
+      for (const c of neutralizeStrings(seg)) {
+        if (c === "(") d++;
+        else if (c === ")") { d--; if (d === 0) { balanced = true; break outer; } }
+      }
     }
-    args = parts.join(" ").replace(/^[^(]*\(/, "");  // drop up to the opening '('
+    if (balanced) args = parts.join(" ").replace(/^[^(]*\(/, "");  // drop up to the opening '('
   }
   const first = args.trimStart();
   // Safe: stringifying an ARRAY literal (array order is preserved, deterministic).
@@ -135,11 +140,47 @@ function jsonStringifyIsSafe(line: string, m: RegExpExecArray, lines?: string[],
   // Safe: a replacer ARRAY is passed as the 2nd arg — keys are explicitly pinned + ordered.
   // crude top-level comma split (good enough; misses nested commas but only ADDS findings if wrong).
   if (/,\s*\[/.test(args)) return true;
-  // Safe: object built via `.sort(` somewhere in the argument (e.g. fromEntries(entries.sort(...))).
-  if (/\.sort\s*\(/.test(args)) return true;
+  // Safe: the SERIALIZED VALUE itself is canonicalized via `.sort(` — but ONLY when the sort is in
+  // the FIRST argument (not a 2nd-arg/unrelated sort) and the first arg has no spread `...` (a spread
+  // re-injects keys in a non-consensused order). [audit JSF-2/OS-1: a `.sort(` ANYWHERE in the arg
+  // was over-suppressing an unrelated sort.] firstArg = up to the first top-level comma.
+  const firstArg = topLevelFirstArg(args);
+  if (/\.sort\s*\(/.test(firstArg) && !/\.\.\./.test(firstArg)) return true;
   // Otherwise: a bare object identifier, a spread/merge, or a `{...}` with a spread — key order
   // isn't provably consensused. FLAG (low) rather than risk a silent miss.
   return false;
+}
+
+// Blank out string/template/regex-literal CONTENTS (keep length/structure) so a `(` or `)` inside a
+// literal is not miscounted when balancing parens. Best-effort single-pass quote tracker; regex is
+// approximated (treat `/.../ ` like a string when it follows a non-value char). Conservative: when
+// unsure we leave chars in place (counting them only risks NOT suppressing = fail-toward-flag).
+function neutralizeStrings(s: string): string {
+  let out = "", q: string | null = null;
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k];
+    if (q) {
+      if (c === "\\") { out += "  "; k++; continue; }   // skip escaped char
+      out += c === q ? c : " ";
+      if (c === q) q = null;
+    } else if (c === '"' || c === "'" || c === "`") { q = c; out += c; }
+    else out += c;
+  }
+  return out;
+}
+
+// The first top-level argument of a call's gathered arg string (up to the first comma at paren/
+// bracket/brace depth 0), on string-neutralized text. Used to scope the `.sort(` safe-check.
+function topLevelFirstArg(args: string): string {
+  const n = neutralizeStrings(args);
+  let depth = 0;
+  for (let k = 0; k < n.length; k++) {
+    const c = n[k];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) return args.slice(0, k);
+  }
+  return args;
 }
 
 // ---- cross-line alias pass: Map/Set reached through a variable OR a member --------------------

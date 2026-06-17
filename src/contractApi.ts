@@ -117,16 +117,13 @@ function structuralChecks(src: string): ApiFinding[] {
   const out: ApiFinding[] = [];
   const code = src.split(/\r?\n/).map(stripLineComment).join("\n");
 
-  // SCOPE GUARD (FP fix, Arena Vanguard 2026-06-18): the structural checks below assert that the
-  // file IS a HotPocket contract entrypoint. Running them on a WRAPPER / runtime / config module
-  // (the HTTP surface, path setup, etc. — outside the consensus kernel) false-positives
-  // "missing-init" / "ignores-ctx" on code that was never meant to be the contract. Only assert
-  // these when the file shows a HotPocket signal (imports the contract lib, references HotPocket /
-  // hpc / ctx). With NO such signal it's almost certainly not the contract file -> skip the
-  // structural checks (the determinism + line-level API checks still run regardless).
-  const hasHotPocketSignal =
-    /hotpocket-nodejs-contract|\bHotPocket\b|\bhpc\b|\bctx\.(?:lclSeqNo|users|npl|unl|contractId|publicKey|readonly)\b/.test(code);
-  if (!hasHotPocketSignal) return out;
+  // NOTE on scope (Arena Vanguard 2026-06-18): these structural checks assert the file IS a HotPocket
+  // contract entrypoint, so on a WRAPPER/runtime module they technically false-positive. We do NOT
+  // skip them on a "no HotPocket signal" heuristic — that hid genuine missing-init/ignores-ctx on a
+  // real contract using a local re-export import + destructured ctx (audit FN-1), and a SILENT MISS
+  // is the worst outcome per THE PRODUCT RULE. Instead the findings below carry a conditional caveat
+  // (ignore if this file is a wrapper/runtime module outside the consensus kernel) — a labeled,
+  // recoverable false-positive, never a hidden false-negative.
 
   // 1) Must register an entry point: `hpc.init(...)` (or `<x>.init(...)` on a HotPocket.Contract()).
   const hasContractCtor = /\bnew\s+HotPocket\.Contract\s*\(/.test(code);
@@ -135,7 +132,7 @@ function structuralChecks(src: string): ApiFinding[] {
     out.push({
       line: 0, column: 0, snippet: "(whole source)", rule: "missing-init",
       severity: "high",
-      why: "No HotPocket contract entry point found: a contract must call `hpc.init(contractFn)` on a `new HotPocket.Contract()` so HotPocket invokes it each consensus round. Without it the contract never runs.",
+      why: "No HotPocket contract entry point found: a contract must call `hpc.init(contractFn)` on a `new HotPocket.Contract()` so HotPocket invokes it each consensus round. Without it the contract never runs. (Ignore if this file is a wrapper / runtime / config module OUTSIDE the consensus kernel — this check assumes the file is the contract entrypoint.)",
       fix: "Add the entry point: `const hpc = new HotPocket.Contract(); hpc.init(contractFn);` where contractFn is `async (ctx) => { ... }`.",
     });
   } else if (!hasContractCtor) {
@@ -153,7 +150,7 @@ function structuralChecks(src: string): ApiFinding[] {
     out.push({
       line: 0, column: 0, snippet: "(whole source)", rule: "ignores-ctx",
       severity: "high",
-      why: "The contract never reads its context (`ctx.users` / `ctx.lclSeqNo` / `ctx.npl`). A HotPocket contract that ignores ctx can't see user inputs or the deterministic clock — it does no useful consensused work.",
+      why: "The contract never reads its context (`ctx.users` / `ctx.lclSeqNo` / `ctx.npl`). A HotPocket contract that ignores ctx can't see user inputs or the deterministic clock — it does no useful consensused work. (Ignore if this file is a wrapper/runtime module outside the kernel, or if you destructure the context param — this heuristic looks for the literal `ctx.<prop>`.)",
       fix: "Use ctx: iterate `ctx.users.list()` and read inputs via `await ctx.users.read(input)`; use `ctx.lclSeqNo` as the clock.",
     });
   }
