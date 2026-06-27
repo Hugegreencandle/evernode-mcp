@@ -554,4 +554,110 @@ describe("determinism checker", () => {
       expect(high(src)).toHaveLength(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // FALSE-POSITIVE SUPPRESSION (codeView): a determinism TOKEN that appears only
+  // as inert LITERAL TEXT — inside a quoted string, a regex literal, or the TEXT
+  // part of a template literal — is never executed, so flagging it is a pure FP.
+  // These cases must now produce NO finding. The companion block right below proves
+  // the suppression is sound: any token in REAL, EXECUTED code (incl. a template
+  // ${...} interpolation, or code adjacent to a string) STILL flags — no FN.
+  // ---------------------------------------------------------------------------
+  describe("FP suppression — determinism tokens inside string/regex/template-text (never executed)", () => {
+    const noFinding = (src: string) => {
+      const { findings } = checkDeterminism(src);
+      expect(findings, `unexpected finding(s) for: ${src} -> ${JSON.stringify(findings.map((f) => f.rule + "@" + f.severity))}`).toHaveLength(0);
+    };
+
+    it("does NOT flag a clock token inside an error/help string", () => {
+      noFinding('throw new Error("do not call Date.now() in a contract");');
+      noFinding('const help = "Date.now() is banned — use ctx.lclSeqNo instead";');
+    });
+    it("does NOT flag randomness mentioned only in a string", () => {
+      noFinding('log("never use Math.random() for picking a winner");');
+      noFinding("const tip = 'crypto.randomUUID() breaks consensus';");
+    });
+    it("does NOT flag process.env / os described in a string", () => {
+      noFinding('const doc = "reading process.env.FOO is non-deterministic";');
+      noFinding('warn("os.hostname() differs per node");');
+    });
+    it("does NOT flag network verbs that are only text in a string/log", () => {
+      noFinding('console.log("about to fetch() the price (in the wrapper, not here)");');
+      noFinding('const m = "use axios() only in the operator API";');
+    });
+    it("does NOT flag iteration / stringify / timers / locale / float advice in a string", () => {
+      noFinding('const note = "iterate Object.keys(o).sort(), not Object.keys(o)";');
+      noFinding('const note = "JSON.stringify(x) needs a sorted replacer";');
+      noFinding('const note = "avoid setTimeout(fn, 100) in contracts";');
+      noFinding('const note = "do not sort with a.localeCompare(b)";');
+      noFinding('const note = "the rate is 0.1 XAH per call";');
+    });
+    it("does NOT flag a determinism token that is the SOURCE of a regex literal", () => {
+      noFinding("const banned = /Date\\.now\\(\\)/;");
+      noFinding("const re = /Math\\.random/g;");
+    });
+    it("does NOT flag tokens inside template-literal TEXT (no interpolation)", () => {
+      noFinding("const msg = `do not use Math.random() here`;");
+      noFinding("const msg = `Date.now() is forbidden`;");
+    });
+    it("does NOT learn a Map/Set alias that only appears inside a string", () => {
+      // the `new Map()` is text in a doc string, so the later real `m` use must NOT be flagged
+      const { findings } = checkDeterminism('const doc = "const m = new Map(); for (..of m)";\nconst x = 1;');
+      expect(findings).toHaveLength(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // NO FALSE-NEGATIVE GUARD for the codeView suppression. Each adversarial case
+  // hides a REAL nondeterminism source next to / inside executed code; the
+  // suppression must NOT swallow it. A miss here would be the lint's cardinal sin.
+  // ---------------------------------------------------------------------------
+  describe("codeView no-FN guard — real nondeterminism next to/inside strings STILL flags", () => {
+    it("flags a clock read in a template ${...} interpolation", () => {
+      expect(checkDeterminism("const s = `stamped at ${Date.now()}`;").findings
+        .some((f) => f.rule === "wall-clock-time" && f.severity === "high")).toBe(true);
+    });
+    it("flags randomness inside a template interpolation", () => {
+      expect(checkDeterminism("const id = `user-${Math.random()}`;").findings
+        .some((f) => f.rule === "randomness" && f.severity === "high")).toBe(true);
+    });
+    it("flags JSON.stringify / Object.keys inside a template interpolation", () => {
+      expect(checkDeterminism("const out = `payload=${JSON.stringify(state)}`;").findings
+        .some((f) => f.rule === "json-stringify-unordered")).toBe(true);
+      expect(checkDeterminism("const out = `keys=${Object.keys(obj)}`;").findings
+        .some((f) => f.rule === "iteration-order")).toBe(true);
+    });
+    it("flags a nested string inside a ${...} that itself contains real code", () => {
+      // the outer template text is inert, but ${ ... "literal" + Date.now() } has executed code
+      expect(checkDeterminism('const s = `x ${"label: " + Date.now()} y`;').findings
+        .some((f) => f.rule === "wall-clock-time")).toBe(true);
+    });
+    it("flags real code that sits AFTER a string on the same line", () => {
+      expect(checkDeterminism('log("note: not here"); const t = Date.now();').findings
+        .some((f) => f.rule === "wall-clock-time")).toBe(true);
+    });
+    it("flags real code that sits BEFORE a string on the same line", () => {
+      expect(checkDeterminism('const r = Math.random(); log("after the call");').findings
+        .some((f) => f.rule === "randomness")).toBe(true);
+    });
+    it("a DIVISION operator does not start a regex and swallow a later token (no FN)", () => {
+      // `a / b` is division (not a regex) — the Date.now() after it must still flag
+      expect(checkDeterminism("const ratio = a / b; const t = Date.now();").findings
+        .some((f) => f.rule === "wall-clock-time")).toBe(true);
+    });
+    it("STILL flags a real network IMPORT specifier (raw rule, string preserved on purpose)", () => {
+      for (const src of ["const net = require('net');", "const dns = require('dns');",
+                         "import https from 'https';", "const h = require('node:net');"]) {
+        expect(checkDeterminism(src).findings.some((f) => f.rule === "network-io" && f.severity === "high"), src).toBe(true);
+      }
+    });
+    it("STILL flags a fetch() call whose only argument is a string URL", () => {
+      expect(checkDeterminism('const r = await fetch("https://api.example.com/price");').findings
+        .some((f) => f.rule === "network-io" && f.severity === "high")).toBe(true);
+    });
+    it("STILL flags a real Map alias even when a same-named token also appears in a string", () => {
+      const { findings } = checkDeterminism('const m = new Map();\nconst doc = "ignore m here";\nfor (const x of m) {}');
+      expect(findings.some((f) => f.rule === "iteration-order-alias")).toBe(true);
+    });
+  });
 });

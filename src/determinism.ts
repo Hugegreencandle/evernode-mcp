@@ -34,6 +34,10 @@ interface Rule {
   severity: Severity;
   why: string;
   fix: string;
+  // When true, match against the RAW (comment-stripped, string-INTACT) line instead of the codeView.
+  // Used only by the network-io IMPORT form, whose signal is a module specifier inside a string
+  // literal (`require('net')` / `from 'dns'`) — neutralizing that string would be a false-negative.
+  raw?: boolean;
   // optional: given the stripped line + the regex match (+ the full stripped-line array and the
   // line index for multi-line lookahead), return true to SUPPRESS the finding (a provably-
   // deterministic use). Heuristic only — used to avoid flagging sorted iteration / canonicalization.
@@ -187,6 +191,69 @@ function isRegexStart(prev: string): boolean {
   return !/[A-Za-z0-9_$)\]]/.test(prev);
 }
 
+// ---- "code view": blank inert LITERAL TEXT so the rules only ever match real, executed code ------
+// FALSE-POSITIVE FIX (the linter's trust problem): the per-line rules previously matched against the
+// comment-stripped line with string/regex CONTENTS still intact, so a determinism token that appears
+// only as inert text — an error message ("do not call Math.random()"), a log line, a help string, a
+// doc string, or the source of a regex literal (`/Date\.now/`) — was flagged as if it were a real
+// clock/rng/network read. That text is NEVER EXECUTED, so flagging it is a pure false positive.
+//
+// `codeView` returns the line with the CONTENTS of single/double-quoted strings, regex literals, and
+// the TEXT parts of template literals replaced by spaces (length- and column-preserving), while
+// PRESERVING the executable `${ ... }` interpolations inside template literals. This is SOUND w.r.t.
+// the tool's cardinal rule (never a false-negative): it only ever removes characters that the JS
+// engine treats as data, never characters it executes. A real `${Date.now()}`, or any token sitting
+// in actual code before/after a string, is untouched and still flagged. Template interpolations can
+// nest arbitrarily (strings inside `${}` inside templates inside `${}`...), so we track a context
+// stack rather than a single flag. Anything ambiguous (an unterminated literal at EOL, a `/` we can't
+// classify) fails toward KEEPING the text as code — i.e. toward FLAGGING — never toward hiding it.
+//
+// NOTE: the `network-io` IMPORT form (`require('net')` / `from 'dns'`) legitimately reads a module
+// specifier that lives INSIDE a string — neutralizing it would be a false-negative. That rule alone
+// is marked `raw` and runs against the un-neutralized (comment-stripped) line; every other rule runs
+// against the codeView.
+type CvCtx = { kind: "code" | "sq" | "dq" | "tpl" | "regex"; brace?: number };
+function codeView(line: string): string {
+  let out = "";
+  const stack: CvCtx[] = [{ kind: "code" }];
+  let prevSig = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    const top = stack[stack.length - 1];
+    if (top.kind === "sq" || top.kind === "dq") {           // inside '...' or "..."
+      if (c === "\\") { out += "  "; i++; continue; }       // skip escaped char (keep length)
+      const q = top.kind === "sq" ? "'" : '"';
+      if (c === q) { out += c; stack.pop(); prevSig = c; } else out += " ";
+    } else if (top.kind === "regex") {                       // inside /.../
+      if (c === "\\") { out += "  "; i++; continue; }
+      if (c === "/") { out += c; stack.pop(); prevSig = c; } else out += " ";
+    } else if (top.kind === "tpl") {                         // inside `...` TEXT (not interpolation)
+      if (c === "\\") { out += "  "; i++; continue; }
+      if (c === "`") { out += c; stack.pop(); prevSig = c; }
+      else if (c === "$" && line[i + 1] === "{") {           // open an executable ${ ... }
+        out += "${"; stack.push({ kind: "code", brace: 0 }); i++; prevSig = "{";
+      } else out += " ";
+    } else {                                                 // executable code (top.kind === "code")
+      if (c === "'") { out += c; stack.push({ kind: "sq" }); prevSig = c; }
+      else if (c === '"') { out += c; stack.push({ kind: "dq" }); prevSig = c; }
+      else if (c === "`") { out += c; stack.push({ kind: "tpl" }); prevSig = c; }
+      else if (c === "/" && line[i + 1] !== "/" && line[i + 1] !== "*" && isRegexStart(prevSig)) {
+        out += c; stack.push({ kind: "regex" }); prevSig = c;
+      } else if (top.brace !== undefined && c === "}" && top.brace === 0) {
+        out += c; stack.pop(); prevSig = c;                  // close the ${ ... } -> back to template
+      } else {
+        if (top.brace !== undefined) {                       // track {} nesting within an interpolation
+          if (c === "{") top.brace++;
+          else if (c === "}") top.brace--;
+        }
+        out += c;
+        if (c.trim()) prevSig = c;
+      }
+    }
+  }
+  return out;
+}
+
 // Split a call's argument string into TOP-LEVEL args (commas at paren/bracket/brace depth 0), over
 // neutralized text. Returns null if the bracketing is unbalanced (depth ever negative, or != 0 at
 // end) — the caller treats null as "cannot prove" and FLAGS. [closes the FN-REGEX-FIRSTARG leak]
@@ -278,10 +345,20 @@ const RULES: Rule[] = [
     severity: "high",
     why: "Each node generates different random bytes — output diverges and consensus fails.",
     fix: "Derive randomness deterministically from consensused data (e.g. hash of the ledger seq + inputs), or coordinate a seed across nodes via NPL before use." },
-  { id: "network-io", re: /\b(fetch|axios|got|node-fetch)\s*\(|require\(['"](https?|node:https?|net|dns|node:net|node:dns)['"]\)|from\s+['"](https?|node:https?|net|dns)['"]/,
+  // network-io CALL form (`fetch(`, `axios(`, ...). Runs against the codeView so a network verb that
+  // appears only as text inside a string/log/error message is NOT a false positive.
+  { id: "network-io", re: /\b(fetch|axios|got|node-fetch)\s*\(/,
     severity: "high",
     why: "Outbound network calls return different results/timing per node (and may fail on some) — non-deterministic and side-effectful inside consensus.",
     fix: "Do NOT call the network from contract logic. Bring external data in as a consensused USER INPUT, or via an oracle pattern where nodes agree on the value through NPL before acting. (If this file is your HTTP/wrapper surface OUTSIDE the consensus kernel — a createServer/http import for the operator API — this is expected; scope the scan to the deterministic kernel, not the wrapper.)" },
+  // network-io IMPORT form (`require('net')` / `import ... from 'dns'`). The signal is a module
+  // specifier that lives INSIDE a string literal, so this rule is `raw` (matches the un-neutralized
+  // line) — neutralizing the specifier would silently miss a real network import (a false-negative).
+  { id: "network-io", raw: true,
+    re: /require\(['"](https?|node:https?|net|dns|node:net|node:dns)['"]\)|from\s+['"](https?|node:https?|net|dns)['"]/,
+    severity: "high",
+    why: "Importing a network module (http/https/net/dns) brings non-deterministic, side-effectful I/O into the contract — outbound calls return different results/timing per node (and may fail on some).",
+    fix: "Do NOT import the network from contract logic. Bring external data in as a consensused USER INPUT, or via an oracle pattern where nodes agree on the value through NPL before acting. (If this file is your HTTP/wrapper surface OUTSIDE the consensus kernel — operator API — this is expected; scope the scan to the deterministic kernel, not the wrapper.)" },
   { id: "node-env",
     // `process.env`/`process.pid` plus the idiomatic bare `process.*` host reads — `process.platform`/
     // `process.arch` (host CPU/OS), `process.cwd()`/`process.uptime()`/`process.memoryUsage()` (per-node
@@ -421,15 +498,21 @@ const ALIAS_FIX =
 export function checkDeterminism(source: string): { findings: Finding[]; summary: string } {
   const findings: Finding[] = [];
   const lines = source.split(/\r?\n/);
-  // First strip comments once (so both passes agree on what's real code), then learn Map/Set aliases.
+  // First strip comments once (so both passes agree on what's real code). Then build the codeView
+  // (string/regex/template-text contents blanked, `${}` interpolations kept) used for matching the
+  // CODE-token rules. Learn Map/Set aliases from the codeView so a `new Map()` that only appears in a
+  // string is not treated as a real binding (a false positive). The raw (string-intact) line is kept
+  // for the one `raw` rule (network import specifiers).
   const stripped = lines.map(stripLineComment);
-  const aliases = collectMapSetAliases(stripped);
+  const cv = stripped.map(codeView);
+  const aliases = collectMapSetAliases(cv);
   lines.forEach((raw, idx) => {
-    const line = stripped[idx];
+    const line = cv[idx];
     for (const rule of RULES) {
-      const m = rule.re.exec(line);
+      const target = rule.raw ? stripped[idx] : line;
+      const m = rule.re.exec(target);
       if (m) {
-        if (rule.suppress && rule.suppress(line, m, stripped, idx)) continue;
+        if (rule.suppress && rule.suppress(target, m, cv, idx)) continue;
         findings.push({
           line: idx + 1,
           column: (m.index ?? 0) + 1,
