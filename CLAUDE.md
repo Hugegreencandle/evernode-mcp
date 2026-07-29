@@ -8,7 +8,7 @@ xahc-prover). TypeScript, ESM, MCP SDK 1.29, node ≥ 20 — mirrors xahau-mcp's
 - Evernode docs: https://docs.evernode.org  (HotPocket SDK, hpdevkit/evdevkit, hosts, cluster models)
 - HotPocket contract API: `hotpocket-nodejs-contract` (`hpc.init(fn)`, `ctx.lclSeqNo`, `ctx.users`)
 - Host data: XRPLWin (xahau.xrplwin.com/evernode), OnLedger, `evdevkit` host list
-- Hook/Xahau settlement → the trifecta repos + `~/Desktop/xahc-prover/docs/XAHAU-DEV-REFERENCE.md`
+- Hook/Xahau settlement → the trifecta repos + the prover checkout's `docs/XAHAU-DEV-REFERENCE.md`
 
 ## Layout (`src/`)
 - `index.ts` — MCP server; registers every tool (one `server.registerTool` each).

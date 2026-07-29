@@ -1,10 +1,10 @@
-// Live "safe by construction -> proven safe" demo (the screen-share for a first call).
+// End-to-end demo: "safe by construction -> proven safe".
 // 1) generate a settlement bundle for a value-moving dApp, then
 // 2) PROVE its guardrail Hook with the real xahc-prover (no fabricated verdict).
 //
 // Requires the xahc-prover checkout (MIT — github.com/Hugegreencandle/xahc-prover). Set
-// XAHC_PROVER_DIR or place it at
-// ~/Desktop/xahc-prover. Run: node demo/prove-settlement.mjs   (after `npm run build`)
+// XAHC_PROVER_DIR to point at it, or place it as a sibling of this repo.
+// Run: node demo/prove-settlement.mjs   (after `npm run build`)
 import { generateSettlement } from "../dist/settlement.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
