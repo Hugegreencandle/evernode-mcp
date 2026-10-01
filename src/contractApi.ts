@@ -117,7 +117,7 @@ function structuralChecks(src: string): ApiFinding[] {
   const out: ApiFinding[] = [];
   const code = src.split(/\r?\n/).map(stripLineComment).join("\n");
 
-  // NOTE on scope (Arena Vanguard 2026-06-18): these structural checks assert the file IS a HotPocket
+  // NOTE on scope (real-codebase feedback, 2026-06-18): these structural checks assert the file IS a HotPocket
   // contract entrypoint, so on a WRAPPER/runtime module they technically false-positive. We do NOT
   // skip them on a "no HotPocket signal" heuristic — that hid genuine missing-init/ignores-ctx on a
   // real contract using a local re-export import + destructured ctx (audit FN-1), and a SILENT MISS

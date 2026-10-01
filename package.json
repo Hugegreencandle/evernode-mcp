@@ -1,17 +1,57 @@
 {
   "name": "evernode-mcp",
-  "version": "0.5.0",
-  "description": "Evernode AI Builder — an MCP server that scaffolds, checks (determinism + Hook/WASM), costs, and deploys HotPocket dApps on Evernode/Xahau.",
+  "version": "0.6.0",
+  "mcpName": "io.github.Hugegreencandle/evernode-mcp",
+  "description": "Model Context Protocol (stdio) server for Evernode/HotPocket dApps: contract templates, a heuristic non-determinism linter, contract-API checks, EVR lease math, live host lookup via OnLedger, and deploy/settlement command generation. Advisory only: holds no keys, never signs or submits.",
   "type": "module",
-  "bin": { "evernode-mcp": "dist/index.js" },
+  "license": "MIT",
+  "author": "Dane Brown",
+  "homepage": "https://github.com/Hugegreencandle/evernode-mcp",
+  "bugs": {
+    "url": "https://github.com/Hugegreencandle/evernode-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hugegreencandle/evernode-mcp.git"
+  },
+  "keywords": [
+    "evernode",
+    "hotpocket",
+    "xahau",
+    "mcp",
+    "model-context-protocol",
+    "smart-contracts",
+    "determinism",
+    "linter",
+    "blockchain"
+  ],
+  "bin": {
+    "evernode-mcp": "dist/index.js"
+  },
   "main": "dist/index.js",
-  "engines": { "node": ">=20" },
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/**/*.d.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "smoke": "node dist/index.js --smoke",
     "test": "tsc && vitest run",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build && npm test && npm run smoke",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -22,7 +62,8 @@
     "vitest": "2.1.8",
     "@types/node": "22.10.2"
   },
-  "license": "MIT",
-  "author": "Dane Brown",
-  "repository": { "type": "git", "url": "git+https://github.com/Hugegreencandle/evernode-mcp.git" }
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

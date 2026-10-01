@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Hugegreencandle/evernode-mcp",
+  "description": "Evernode/HotPocket dApp helper: templates, non-determinism lint, lease math, live host lookup.",
+  "title": "Evernode MCP",
+  "websiteUrl": "https://github.com/Hugegreencandle/evernode-mcp",
+  "repository": {
+    "url": "https://github.com/Hugegreencandle/evernode-mcp",
+    "source": "github"
+  },
+  "version": "0.6.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "evernode-mcp",
+      "version": "0.6.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

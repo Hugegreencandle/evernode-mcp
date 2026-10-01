@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { createRequire } from "node:module";
 import { listTemplates, generate } from "./templates.js";
 import { checkDeterminism } from "./determinism.js";
 import { checkContractApi } from "./contractApi.js";
@@ -16,7 +17,8 @@ import {
   DEPLOY_COMMANDS_OUT, EXPLAIN_ERROR_OUT, CHECK_CONTRACT_API_OUT, HOST_DIAGNOSTICS_OUT,
 } from "./outputSchemas.js";
 
-const VERSION = "0.5.0";
+// Single source of truth: package.json (dist/index.js and src/index.ts both sit one level below it).
+const VERSION: string = createRequire(import.meta.url)("../package.json").version;
 
 // Every tool returns the human-readable JSON text AND validated structuredContent. The object we
 // return IS the structured payload (these tools never throw their own error result — handler
@@ -28,7 +30,8 @@ const ok = (v: object) => ({
 });
 
 // Shared annotations: every evernode-mcp tool is read-only/advisory (no keys, no spend, no deploy).
-// openWorldHint is true ONLY for the one tool that may reach the live OnLedger network.
+// openWorldHint is true ONLY for the two tools that may reach the live OnLedger API
+// (recommend_hosts, host_diagnostics).
 const OFFLINE = { readOnlyHint: true, openWorldHint: false, idempotentHint: true } as const;
 const LIVE = { readOnlyHint: true, openWorldHint: true, idempotentHint: true } as const;
 
@@ -47,7 +50,7 @@ server.registerTool("list_templates", {
 
 server.registerTool("generate_contract", {
   title: "Generate a HotPocket dApp",
-  description: "Generate a deterministic-by-construction HotPocket dApp file set (contract + state helper + hp.cfg.override + package.json + client) for a template.",
+  description: "Generate a HotPocket dApp file set (contract + state helper + hp.cfg.override + package.json + client) for a template. Templates avoid the known non-determinism sources (no wall-clock, randomness, or network in the contract path; time = ctx.lclSeqNo) and pass check_determinism with no HIGH findings — lint-clean, not proven deterministic.",
   inputSchema: {
     template: z.enum(["blank", "escrow", "subscription", "game_backend", "voting", "token_gated", "payment_splitter", "oracle_consumer", "streaming_payment", "multisig_treasury"]),
     name: z.string().optional().describe("project/contract name (default: mycontract)"),
@@ -58,7 +61,7 @@ server.registerTool("generate_contract", {
 
 server.registerTool("check_determinism", {
   title: "Check contract determinism",
-  description: "Heuristic scan of HotPocket contract source for non-deterministic patterns (wall-clock, randomness, network I/O, env, timers, unordered iteration) that break cluster consensus. HIGH findings are likely consensus breakers. Guidance, not a proof.",
+  description: "Heuristic linter for HotPocket contract source: flags known non-deterministic patterns that can break cluster consensus (wall-clock, randomness, network I/O, env/host reads, timers/races, filesystem outside the state file, unordered iteration/serialization, locale/ICU, floating-point literals). HIGH findings are likely consensus breakers. A clean result means none of these patterns were found — it does not prove the contract is deterministic.",
   inputSchema: { source: z.string().describe("the contract JS/TS source to scan") },
   outputSchema: CHECK_DETERMINISM_OUT,
   annotations: { title: "Check contract determinism (heuristic)", ...OFFLINE },
@@ -81,25 +84,25 @@ server.registerTool("recommend_pattern", {
 }, async ({ use_case }) => ok(recommendPattern(use_case)));
 
 server.registerTool("check_hook_compat", {
-  title: "Check Xahau Hook / WASM compatibility",
-  description: "When a dApp settles value on Xahau through a Hook-guarded account, hands off to the trifecta: build/lint the Hook with xahc, simulate it with xahau-mcp, and PROVE the spend invariant with xahc-prover. Returns the recommended workflow.",
+  title: "Xahau Hook settlement workflow",
+  description: "Returns the recommended workflow (no analysis is performed) for a dApp that settles value on Xahau through a Hook-guarded account: build/lint the Hook with xahc, simulate it with xahau-mcp, prove the spend invariant with xahc-prover, then install via an unsigned SetHook.",
   inputSchema: { involves_hook: z.boolean().describe("does the dApp's Xahau account run a Hook?"), what: z.string().optional().describe("what the hook should enforce, e.g. 'per-tx spend limit'") },
   outputSchema: CHECK_HOOK_COMPAT_OUT,
-  annotations: { title: "Check Xahau Hook / WASM compatibility", ...OFFLINE },
+  annotations: { title: "Xahau Hook settlement workflow", ...OFFLINE },
 }, async ({ involves_hook, what }) => ok({
   involvesHook: involves_hook,
   workflow: involves_hook ? [
     "1. Author + compile the Hook with `xahc` (build → clean → lint).",
     "2. Simulate it against a sample settlement tx with `xahau-mcp` (execute_hook / simulate_transaction).",
-    `3. PROVE the safety invariant with \`xahc prove\` (e.g. ${what ? `'${what}' → ` : ""}--invariant limit / conservation / authz). A PROVEN verdict bounds the account's behavior for ALL inputs; a COUNTEREXAMPLE is the attack tx.`,
+    `3. PROVE the safety invariant with \`xahc prove\` (e.g. ${what ? `'${what}' → ` : ""}--invariant limit / conservation / authz). A PROVEN verdict holds for all inputs within the prover's modeled scope (it fails closed to INCONCLUSIVE outside it); a COUNTEREXAMPLE is the attack tx.`,
     "4. Install via `xahc install-tx` (unsigned SetHook), sign offline, deploy on the cluster's Xahau multisig account.",
   ] : ["No Hook involved — settlement (if any) is a plain Xahau Payment from the cluster account. If you add value limits later, guard the account with a Hook and prove it via the trifecta."],
   repos: { write: "github.com/Hugegreencandle/xahc", simulate: "github.com/Hugegreencandle/xahau-mcp", prove: "github.com/Hugegreencandle/xahc-prover" },
 }));
 
 server.registerTool("generate_settlement", {
-  title: "Generate safe Xahau settlement",
-  description: "For a value-moving dApp, generate the cluster-side Xahau payout code + the install of the trifecta's PROVEN agent_guardrail Hook (per-tx LIM + optional DST lock) on the cluster account + the exact `xahc prove` command. 'Safe by construction → proven safe' — the ledger enforces the spend cap even if the contract/signer is wrong.",
+  title: "Generate Xahau settlement bundle",
+  description: "For a value-moving dApp, generate the cluster-side Xahau payout code (a starting point; multisig aggregation is left to you) + an unsigned `xahc install-tx` command for the agent_guardrail Hook (per-tx LIM spend cap + optional DST lock) on the cluster account + the `xahc prove` command to check it. Emits commands only — no safety verdict. While that Hook is installed it makes the ledger reject outgoing Payments over LIM or to a non-allowed DST; it fires on Payment only, so it does not stop the account's signers from removing it with SetHook or moving value with other transaction types.",
   inputSchema: {
     template: z.enum(["escrow", "subscription", "payment_splitter", "streaming_payment", "multisig_treasury"]),
     limit_drops: z.number().int().nonnegative().describe("per-tx spend cap in drops (the LIM hook param)"),
@@ -107,7 +110,7 @@ server.registerTool("generate_settlement", {
     cluster_account: z.string().optional().describe("the cluster's Xahau (multisig) account r-address"),
   },
   outputSchema: GENERATE_SETTLEMENT_OUT,
-  annotations: { title: "Generate safe Xahau settlement", ...OFFLINE },
+  annotations: { title: "Generate Xahau settlement bundle", ...OFFLINE },
 }, async ({ template, limit_drops, dest, cluster_account }) =>
   ok(generateSettlement({ template, limitDrops: limit_drops, dest, clusterAccount: cluster_account })));
 
@@ -127,7 +130,7 @@ server.registerTool("estimate_lease_cost", {
 
 server.registerTool("recommend_hosts", {
   title: "Recommend Evernode hosts (live)",
-  description: "Fetch + rank live Evernode hosts from OnLedger (api.onledger.net, real-time from the Xahau registry) by cheap | capacity | reputation, with optional filters. Or pass your own `hosts` list to rank it. Real data only — never invents hosts.",
+  description: "Fetch + rank live Evernode hosts from the public OnLedger API (api.onledger.net, which indexes the Evernode registry on Xahau) by cheap | capacity | reputation; the filters (min_reputation, min_slots, country, min_ram_mb, limit) are passed to that live query. Or pass your own `hosts` list to rank it (filters are not applied to a supplied list; top 10 returned). Real data only — never invents hosts.",
   inputSchema: {
     prefer: z.enum(["cheap", "capacity", "reputation"]).optional(),
     min_reputation: z.number().optional().describe("0–255 host reputation floor"),
@@ -142,7 +145,7 @@ server.registerTool("recommend_hosts", {
     })).optional().describe("optional: rank this supplied list instead of fetching live"),
   },
   outputSchema: RECOMMEND_HOSTS_OUT,
-  // openWorldHint: true — this is the ONLY tool that may reach a live external endpoint (OnLedger).
+  // openWorldHint: true — may reach the live OnLedger API (as does host_diagnostics).
   annotations: { title: "Recommend Evernode hosts (live)", ...LIVE },
 }, async ({ prefer, min_reputation, min_slots, country, min_ram_mb, limit, hosts }) =>
   ok(await recommendHosts({
@@ -152,7 +155,7 @@ server.registerTool("recommend_hosts", {
 
 server.registerTool("host_diagnostics", {
   title: "Diagnose an Evernode host (live)",
-  description: "Health view of a single Evernode host by r-address: registration status, reputation, active/total instance slots, lease terms (rate/moments if available), and red-flags (low reputation, full capacity, stale/inactive). Fetches live from OnLedger (api.onledger.net, real-time from the Xahau registry) — or pass a `host` object to diagnose it. REAL data only: unknown fields are OMITTED (never invented); honest empty + note on not-found / fetch failure.",
+  description: "Health view of a single Evernode host by r-address: registration status, reputation, active/total/available instance slots, lease rate (EVR per Moment and/or drops, if the source has them), RAM/disk, and red-flags (flagged in the registry, marked inactive, reputation < 50, zero reputation, full capacity). Fetches live from the public OnLedger API (api.onledger.net) — or pass a `host` object to diagnose it. REAL data only: unknown fields are OMITTED (never invented); honest found:false + note on not-found / fetch failure.",
   inputSchema: {
     address: z.string().optional().describe("the host's Xahau r-address to look up live on OnLedger"),
     host: z.object({
@@ -161,6 +164,7 @@ server.registerTool("host_diagnostics", {
       activeInstances: z.number().optional(), hostReputation: z.number().optional(),
       ramMb: z.number().optional(), diskMb: z.number().optional(), countryCode: z.string().optional(),
       version: z.string().optional(), lastHeartbeatLedger: z.number().optional(), flagged: z.number().optional(),
+      active: z.number().optional().describe("1 = active, 0 = inactive (as reported by the source)"),
     }).optional().describe("optional: diagnose this supplied host object instead of fetching live"),
   },
   outputSchema: HOST_DIAGNOSTICS_OUT,
@@ -213,7 +217,7 @@ async function smoke() {
   checks.push(["checker flags JSON.stringify of an unordered object", jstr.findings.some((f) => f.rule === "json-stringify-unordered")]);
   const sorted = checkDeterminism("Object.keys(o).sort().forEach(f);\nJSON.stringify([1, 2, 3]);\nconst n = ctx.lclSeqNo;");
   checks.push(["checker suppresses sorted forEach + array stringify (no false-positive)", sorted.findings.length === 0]);
-  // FP fix (Arena Vanguard): a MULTI-LINE sorted-keys canonicalizer must be SUPPRESSED...
+  // FP fix (real-codebase feedback): a MULTI-LINE sorted-keys canonicalizer must be SUPPRESSED...
   const mlSorted = checkDeterminism("return JSON.stringify(\n  Object.keys(value).sort().map((k) => [k, value[k]])\n);");
   checks.push(["checker suppresses multi-line sorted-keys JSON.stringify canonicalizer (no false-positive)",
     mlSorted.findings.filter((f) => f.rule === "json-stringify-unordered").length === 0]);
@@ -269,7 +273,7 @@ async function smoke() {
   // contract-API checker: a good contract is clean; each misuse is flagged.
   const goodApi = checkContractApi(generate("escrow").files["src/index.js"]);
   checks.push(["contract-API checker: good contract is clean", goodApi.findings.length === 0]);
-  // FN-guard FN-1 (Arena Vanguard audit): a real contract that lacks the HotPocket signal words
+  // FN-guard FN-1 (FP-fix audit): a real contract that lacks the HotPocket signal words
   // (local re-export import + destructured ctx) and FORGETS init must STILL flag missing-init — the
   // scope guard must not silently skip it.
   const sigless = checkContractApi('import { Contract as C } from "./bundle.js";\nasync function fn({ users }) { await users.list(); }');
@@ -300,7 +304,23 @@ async function smoke() {
   process.exit(fail.length ? 1 : 0);
 }
 
-if (process.argv.includes("--smoke")) {
+const HELP = `evernode-mcp ${VERSION} — MCP server for Evernode/HotPocket dApps (stdio)
+
+Usage:
+  evernode-mcp            start the MCP server on stdin/stdout (launched by an MCP client)
+  evernode-mcp --smoke    offline self-test, exits 0 on success
+  evernode-mcp --version  print the version
+  evernode-mcp --help     print this help
+
+Advisory and read-only: holds no keys, never signs or submits, never acquires a lease.
+Only recommend_hosts and host_diagnostics make network calls (HTTPS GET to api.onledger.net).
+https://github.com/Hugegreencandle/evernode-mcp`;
+
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(HELP);
+} else if (process.argv.includes("--version") || process.argv.includes("-v")) {
+  console.log(VERSION);
+} else if (process.argv.includes("--smoke")) {
   smoke();
 } else {
   const transport = new StdioServerTransport();

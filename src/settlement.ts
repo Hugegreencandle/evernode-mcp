@@ -1,11 +1,12 @@
 // Settlement layer: when a value-moving dApp (escrow, payment_splitter, subscription payout)
 // pays out on Xahau, it does so from the cluster's account. This generates the full
-// "safe by construction -> proven safe" bundle:
+// settlement bundle:
 //   1. cluster-side payment code (deterministic INTENT from the contract; signing OUTSIDE
 //      consensus via the cluster's multisig/threshold signer),
 //   2. the install of the trifecta's agent_guardrail Hook on that account with the caller's
 //      LIM (per-tx spend cap) + optional DST (destination lock),
-//   3. the exact `xahc prove` command that PROVES the guardrail safe for all inputs.
+//   3. the exact `xahc prove` command that checks the guardrail invariant on the caller's own
+//      build (PROVEN holds within the prover's modeled scope; it fails closed otherwise).
 //
 // The guardrail Hook is the already-built, already-testnet-validated artifact from xahc-prover
 // (agent_guardrail.wasm). We set LIM/DST as HookParameters per account — no new WASM to build.
@@ -26,8 +27,12 @@ const SETTLE_JS = (cluster: string) => `// xahau/settle.js — cluster-side Xaha
 // each node proposes the same payment, and a threshold of node signers co-sign it before
 // submission. This keeps the value decision consensused while no single node holds spend power.
 //
-// The account runs the agent_guardrail Hook (installed below), so even a buggy/compromised
-// signer set CANNOT exceed the per-tx LIM or pay a non-allowed DST — the ledger rejects it.
+// The account runs the agent_guardrail Hook (installed separately), so a Payment over the
+// per-tx LIM or to a non-allowed DST is rejected by the ledger even if this code or a signer
+// is wrong. LIMITS: the Hook fires on Payment only — the account's signers can still remove it
+// with SetHook or move value with other transaction types, so guard the signer quorum too.
+// This file is a STARTING POINT: lib.sign below is single-key; replace it with multisig
+// aggregation before real use.
 import * as lib from "xrpl-accountlib";
 import { XrplClient } from "xrpl-client";
 
@@ -81,8 +86,9 @@ export function generateSettlement(opts: { template: string; limitDrops: number;
       `LIM = ${opts.limitDrops} drops -> HookParameter ${LIM_KEY_HEX}=${limHex} (8-byte big-endian).`,
       opts.dest ? `DST locks payouts to ${opts.dest}; decode it to a 20-byte account-id hex for the param.`
                 : "No DST set -> outgoing payments aren't destination-locked. Add `dest` to lock them.",
-      "The agent_guardrail Hook is the trifecta's PROVEN artifact: `xahc prove ... --invariant guardrail` returns PROVEN (spend-limit + dst-lock) for ALL inputs, and the same hook was validated on Xahau testnet (see xahc-prover/docs/TESTNET-PROOF.md — over-limit pay -> tecHOOK_REJECTED on-chain).",
-      "Signing is multisig/threshold across the cluster's signer nodes — never a single node. The contract only decides amounts; the Hook enforces the cap at layer 1.",
+      "The reference agent_guardrail Hook returns PROVEN (spend-limit + dst-lock) under `xahc prove ... --invariant guardrail`, within the prover's modeled scope, and was exercised on Xahau testnet (see xahc-prover/docs/TESTNET-PROOF.md — over-limit pay -> tecHOOK_REJECTED on-chain). That result is for the reference build; re-run the prove command on yours.",
+      "The Hook fires on Payment only: it does not stop the account's signers from removing it (SetHook) or moving value with other transaction types. Protect the signer quorum.",
+      "Intended signing model: multisig/threshold across the cluster's signer nodes — never a single node. The generated settle.js signs with a single key as a placeholder; replace it with multisig aggregation. The contract only decides amounts; the Hook enforces the per-Payment cap at layer 1.",
       "Run the prove command on YOUR built wasm before deploy; deploy only on a PROVEN verdict.",
     ],
   };

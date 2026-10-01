@@ -5,6 +5,60 @@ All notable changes to evernode-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-01
+
+First npm release (`npx evernode-mcp`) and MCP Registry entry
+(`io.github.Hugegreencandle/evernode-mcp`). Also an accuracy pass over every tool description
+and README claim against the code, and against the real `evdevkit` 0.7.22 / `hpdevkit` 0.6.9 CLIs.
+
+### Fixed
+- **`host_diagnostics` reported every live host as "not found".** It requested
+  `api.onledger.net/host/<address>`, which returns 404 for every address; OnLedger serves a single
+  host at `/hosts/<address>` (wrapped as `{ success, host }`, already tolerated). Found by the live
+  smoke test on 2026-10-01; regression test uses a recorded response. Also red-flags a host the
+  source marks inactive (`active: 0`).
+- **`generate_deploy_commands` emitted evdevkit commands that don't exist.** `cluster` mode used
+  `evdevkit cluster create|deploy|status`; the real CLI has `evdevkit cluster-create <size>
+  <contract-path> <contract-bin> <hosts-file>` (plus `-m`, `-e/--evr-limit`) and no cluster
+  deploy/status. `single` mode used a 3-arg `evdevkit deploy ./dist ip:port pubkey`; the real flow is
+  `evdevkit bundle <contract-path> <instance-pubkey> <contract-bin>` then `evdevkit deploy
+  <bundle.zip> <instance-ip> <user-port>`. Both modes now also set `EV_TENANT_SECRET` (required by
+  `acquire`) alongside `EV_USER_PRIVATE_KEY`, as placeholders. Regression test pins the real shape.
+- **Generated `package.json` never built the contract into `dist/`.** `build` was a no-op, so
+  `npm start` (`hpdevkit deploy dist`) shipped only `dist/hp.cfg.override`. It now matches Evernode's
+  own example contracts: `ncc build src/index.js -o dist`, `start` builds first, `@vercel/ncc`
+  devDependency, and `hotpocket-nodejs-contract` pinned to `^0.7.4` instead of `*`. Verified by
+  generating a template and bundling it (dist/index.js + dist/hp.cfg.override + dist/package.json).
+- Local scaffold hint now uses `hpdevkit gen nodejs starter-contract` (the documented template).
+- Determinism false-positive/false-negative fixes from 2026-06-18 (commits be86472..fe70546): FP cuts
+  for sorted JSON.stringify and contract-API scope, then two audit rounds that closed the
+  false-negatives those cuts introduced; ambiguity now fails toward flagging.
+
+### Changed — wording (accuracy)
+- `check_determinism` / `generate_contract` / README: dropped "deterministic by construction".
+  Templates are **lint-clean** (no HIGH `check_determinism` findings); the checker is a heuristic
+  linter and a clean result is not a proof of determinism.
+- `generate_settlement`: dropped "safe by construction → proven safe" and "even a compromised signer
+  set cannot exceed the cap". The guardrail Hook fires on `Payment` only, so the account's signers
+  can still remove it (`SetHook`) or move value with other transaction types; the description, notes
+  and generated `settle.js` now say so. PROVEN is stated as holding within the prover's modeled
+  scope. `settle.js` is labelled a starting point (it signs with a single key as a placeholder).
+- `check_hook_compat`: title is now "Xahau Hook settlement workflow"; it returns a workflow and does
+  not analyze a Hook. (Tool name unchanged.)
+- `recommend_hosts` / `host_diagnostics`: describe OnLedger as a public index of the Evernode
+  registry (not "real-time from the registry"); `recommend_hosts` filters apply to the live query
+  only; `host_diagnostics` lists its actual fields and red-flag rules.
+
+### Added
+- `--help` and `--version` flags; the version is read from `package.json`.
+- npm packaging: `mcpName`, `files` allowlist, `exports`, `publishConfig`, `homepage`/`bugs`/
+  `keywords`, and `prepublishOnly` (clean → build → test → smoke).
+- `server.json` for the MCP Registry (npm package, stdio transport; no environment variables).
+- README: npm/npx install, Claude Code + Claude Desktop config, and a Network access section.
+
+### Security
+- Lockfile: `npm audit fix` (non-breaking) — 0 known vulnerabilities in production dependencies.
+
 ## [0.5.0] - 2026-06-15
 
 Enterprise hardening pass: closes the residual gaps a prior audit had documented as "out of scope"
