@@ -64,7 +64,7 @@ export interface HostRow {
   address: string; leaseAmount?: number; leaseDrops?: number; availableInstances?: number;
   maxInstances?: number; activeInstances?: number; hostReputation?: number; ramMb?: number;
   diskMb?: number; countryCode?: string; version?: string; hostingType?: string; flagged?: number;
-  lastHeartbeatLedger?: number;
+  lastHeartbeatLedger?: number; active?: number;
 }
 
 const ONLEDGER = "https://api.onledger.net";
@@ -110,6 +110,7 @@ function mapHost(h: Record<string, unknown>): HostRow {
     version: coerceStr(h.version),
     hostingType: coerceStr(h.hostingType),
     flagged: coerceNum(h.flagged),
+    active: coerceNum(h.active),
   };
 }
 
@@ -205,7 +206,9 @@ export interface HostDiagnostics {
 // Fetch a single host record by address. Honest on failure (no fabricated fallback). Cached.
 export async function fetchHostByAddress(address: string):
   Promise<{ host?: HostRow; source: string; query: string; note?: string }> {
-  const url = `${ONLEDGER}/host/${encodeURIComponent(address)}`;
+  // OnLedger serves a single host at /hosts/<address> ({ success, host }); /host/<address> is a 404
+  // for every address (checked live 2026-10-01), which made every lookup read as "not found".
+  const url = `${ONLEDGER}/hosts/${encodeURIComponent(address)}`;
   const cached = hostCache.get(url);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS && !cached.value.note) {
     return { host: cached.value.hosts[0], source: cached.value.source, query: url, note: "served from cache" };
@@ -243,6 +246,7 @@ export function diagnoseHost(h: HostRow): HostDiagnostics {
   const available = h.availableInstances ?? (total != null && active != null ? total - active : undefined);
   const redFlags: string[] = [];
   if (h.flagged) redFlags.push("host is FLAGGED in the registry");
+  if (h.active === 0) redFlags.push("marked INACTIVE by the source (no recent heartbeat)");
   if (h.hostReputation != null && h.hostReputation < 50) redFlags.push(`low reputation (${h.hostReputation}/255)`);
   if (available != null && available <= 0) redFlags.push("at full capacity (no free instances)");
   if (h.hostReputation === 0) redFlags.push("zero reputation — likely stale/never-active");
@@ -298,28 +302,40 @@ export function deployCommands(opts: { mode: "local" | "single" | "cluster" | "c
   switch (opts.mode) {
     case "local":
       return { steps: [
-        "# Local 3-node dev cluster (no real hosts, no EVR):",
-        `hpdevkit gen nodejs blank-contract ${name}`,
+        "# Local dev cluster (no real hosts, no EVR; needs Docker + `npm i -g hpdevkit`):",
+        `hpdevkit gen nodejs starter-contract ${name}   # or use generate_contract's files`,
         `cd ${name} && npm install`,
         "npm start            # builds + deploys dist/ to the local cluster",
         "hpdevkit logs 1      # tail node 1",
-        "hpdevkit stop        # stop the cluster",
+        "hpdevkit stop        # stop the cluster (hpdevkit clean deletes it)",
       ], notes: ["Iterate here until check_determinism is clean and behavior is right, THEN lease real hosts."] };
     case "single":
       return { steps: [
-        "# Acquire ONE real instance on a chosen host (needs an EVR-funded tenant Xahau account):",
-        "export EV_USER_PRIVATE_KEY=...   # tenant key (evdevkit keygen to create one)",
-        `evdevkit acquire ${opts.host ?? "<HOST_XAHAU_ADDRESS>"} -m <moments>`,
-        `evdevkit deploy ./dist <instance-ip>:<user-port> <instance-pubkey>`,
-      ], notes: ["Get a host address + lease rate from XRPLWin / OnLedger first (use recommend_hosts).", "EVR is spent here — confirm the lease cost with estimate_lease_cost."] };
+        "# Acquire ONE real instance on a chosen host (needs an EVR-funded tenant Xahau account; `npm i -g evdevkit`):",
+        "export EV_TENANT_SECRET=<tenant Xahau account secret>      # set in your own shell; never paste it into a chat",
+        "export EV_USER_PRIVATE_KEY=<hex key from `evdevkit keygen`>  # the contract-client key",
+        `evdevkit acquire ${opts.host ?? "<HOST_XAHAU_ADDRESS>"} -m <moments>   # note the instance IP, user port and public key it prints`,
+        "evdevkit bundle <abs-path-to-dist> <instance-public-key> /usr/bin/node -a index.js",
+        "evdevkit deploy <abs-path-to-bundle.zip> <instance-ip> <user-port>",
+      ], notes: [
+        "Get a host address + lease rate from OnLedger / XRPLWin first (use recommend_hosts).",
+        "EVR is spent at `evdevkit acquire` — confirm the lease cost with estimate_lease_cost.",
+        "One-step alternative: `evdevkit acquire-and-deploy <abs-path-to-dist> /usr/bin/node <host> -a index.js -m <moments>`.",
+        "Commands match evdevkit 0.7.22; run `evdevkit <command> --help` if your version differs.",
+      ] };
     case "cluster":
       return { steps: [
-        `# Lease + deploy a ${n}-node cluster with evdevkit:`,
-        "export EV_USER_PRIVATE_KEY=...",
-        `evdevkit cluster create ${n} -m <moments>   # acquires ${n} instances`,
-        "evdevkit cluster deploy ./dist              # deploys the contract to all nodes",
-        "evdevkit cluster status",
-      ], notes: ["For value-holding clusters use ≥3 nodes. Extend leases before they expire or instances are reclaimed."] };
+        `# Lease + deploy a ${n}-node cluster with evdevkit (needs an EVR-funded tenant Xahau account):`,
+        "export EV_TENANT_SECRET=<tenant Xahau account secret>      # set in your own shell; never paste it into a chat",
+        "export EV_USER_PRIVATE_KEY=<hex key from `evdevkit keygen`>",
+        "# hosts.txt: preferred host r-addresses, one per line (e.g. from recommend_hosts)",
+        `evdevkit cluster-create ${n} <abs-path-to-dist> /usr/bin/node hosts.txt -a index.js -m <moments> -e <max-EVR-to-spend>`,
+        "evdevkit extend <instances-file> -m <moments>   # extend leases before they expire",
+      ], notes: [
+        "For value-holding clusters use ≥3 nodes. Extend leases before they expire or instances are reclaimed.",
+        "`-e/--evr-limit` caps the EVR spent on acquisitions; confirm the cost with estimate_lease_cost first.",
+        "Commands match evdevkit 0.7.22; run `evdevkit cluster-create --help` if your version differs.",
+      ] };
     case "cluster-manager":
       return { steps: [
         "# Use Offledger's Cluster Manager (a hosted GUI/service) — connect to it, don't replace it:",

@@ -126,3 +126,20 @@ describe("templates", () => {
     expect(["streaming_payment", "multisig_treasury"].every((t) => listTemplates().includes(t))).toBe(true);
   });
 });
+
+// v0.6.0: the generated package.json must actually put the contract into dist/ before
+// `hpdevkit deploy dist` (it used to deploy only dist/hp.cfg.override — build was a no-op).
+// Same shape as Evernode's example contracts: ncc bundles src/ -> dist/index.js.
+describe("generated package.json builds the contract into dist/", () => {
+  for (const t of listTemplates()) {
+    it(`${t}: build bundles src/index.js into dist, start builds first`, () => {
+      const pkg = JSON.parse(generate(t, "x").files["package.json"]);
+      expect(pkg.scripts.build).toBe("ncc build src/index.js -o dist");
+      expect(pkg.scripts.start).toBe("npm run build && hpdevkit deploy dist");
+      expect(pkg.devDependencies["@vercel/ncc"]).toBeTruthy();
+      expect(pkg.dependencies["hotpocket-nodejs-contract"]).not.toBe("*");
+      const cfg = JSON.parse(generate(t, "x").files["dist/hp.cfg.override"]);
+      expect(cfg.contract.bin_args).toBe("index.js");   // ncc's output file name
+    });
+  }
+});

@@ -281,3 +281,31 @@ describe("hostDiagnostics (live path, mocked fetch)", () => {
     expect(second.note).toMatch(/cache/);
   });
 });
+
+// v0.6.0: OnLedger serves one host at /hosts/<address>; /host/<address> 404s for every address,
+// so every live lookup used to read "not found". Fixture = a literal subset of the live response
+// recorded 2026-10-01 for rJ3BVsL1ZJ4Yk647guhvjR7prZ6eZ9V3g (note leaseAmount is a STRING there).
+describe("fetchHostByAddress hits the real OnLedger single-host path", () => {
+  const RECORDED = {
+    success: true,
+    host: {
+      address: "rJ3BVsL1ZJ4Yk647guhvjR7prZ6eZ9V3g", active: 1, countryCode: "US",
+      maxInstances: 3, activeInstances: 1, availableInstances: 2, leaseAmount: "0.001",
+      leaseDrops: 1000, hostReputation: 255, version: "1.0.0", ramMb: 10000, diskMb: 8500, flagged: 0,
+    },
+  };
+  it("requests /hosts/<address> (not /host/<address>) and parses the { success, host } wrapper", async () => {
+    const seen: string[] = [];
+    __setFetchForTest((async (url: string) => { seen.push(String(url)); return jsonResp(RECORDED); }) as unknown as typeof fetch);
+    const d = await hostDiagnostics({ address: "rJ3BVsL1ZJ4Yk647guhvjR7prZ6eZ9V3g" });
+    expect(seen).toEqual(["https://api.onledger.net/hosts/rJ3BVsL1ZJ4Yk647guhvjR7prZ6eZ9V3g"]);
+    expect(d.found).toBe(true);
+    expect(d.reputation).toBe(255);
+    expect(d.lease).toEqual({ evrPerMoment: 0.001, leaseDrops: 1000 });
+    expect(d.slots).toEqual({ active: 1, total: 3, available: 2 });
+  });
+  it("an inactive host (active: 0) is red-flagged", () => {
+    const d = diagnoseHost({ address: "rIdle", active: 0, hostReputation: 200, maxInstances: 3, activeInstances: 0 });
+    expect(d.redFlags.some((f) => /INACTIVE/.test(f))).toBe(true);
+  });
+});

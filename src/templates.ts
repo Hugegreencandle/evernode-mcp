@@ -1,7 +1,8 @@
 // HotPocket dApp templates. Each returns a file set (contract + config + client + package.json)
-// that is DETERMINISTIC by construction — no wall-clock, no randomness, no network in the
-// contract path; time is the consensus ledger seq (ctx.lclSeqNo); state persists through the
-// contract's own consensused state file. (They are written to pass src/determinism.ts.)
+// written to avoid the known non-determinism sources — no wall-clock, no randomness, no network
+// in the contract path; time is the consensus ledger seq (ctx.lclSeqNo); state persists through
+// the contract's own consensused state file. They are lint-clean against src/determinism.ts (no
+// HIGH findings); that is a heuristic check, not a proof of determinism.
 //
 // HotPocket contract model recap: HotPocket invokes your function once per consensus round
 // with `ctx` { lclSeqNo, users{ list(), read(input), ... } }. You read user inputs, mutate
@@ -28,8 +29,11 @@ const CFG = JSON.stringify({ contract: { bin_path: "/usr/bin/node", bin_args: "i
 
 const PKG = (name: string) => JSON.stringify({
   name, version: "0.1.0", type: "module", main: "index.js",
-  scripts: { start: "hpdevkit deploy dist", build: "echo no-build" },
-  dependencies: { "hotpocket-nodejs-contract": "*" },
+  // Same shape as Evernode's own examples: ncc bundles src/ + deps into dist/index.js (next to
+  // dist/hp.cfg.override), then hpdevkit deploys dist/ to the local cluster.
+  scripts: { build: "ncc build src/index.js -o dist", start: "npm run build && hpdevkit deploy dist" },
+  dependencies: { "hotpocket-nodejs-contract": "^0.7.4" },
+  devDependencies: { "@vercel/ncc": "^0.38.3" },
 }, null, 2);
 
 const CLIENT = `import HotPocket from "hotpocket-js-client";
@@ -345,7 +349,7 @@ const TEMPLATES: Record<string, { body: string; notes: string[] }> = {
         if (count >= s.threshold) {
           p.status = "approved";
           // THRESHOLD MET -> emit the settlement step. The contract records the approved payout;
-          // the actual Xahau multisig Payment + the PROVEN agent_guardrail Hook come from
+          // the actual Xahau multisig Payment + the agent_guardrail Hook install come from
           // generate_settlement (template: "multisig_treasury"). The contract never signs/spends.
           await user.send(JSON.stringify({ approved: true, id: m.id, count, threshold: s.threshold,
                                            settle: { destination: p.destination, drops: p.drops },
@@ -363,7 +367,7 @@ const TEMPLATES: Record<string, { body: string; notes: string[] }> = {
   save(s);`,
     notes: [
       "Records spend PROPOSALS + M-of-N APPROVALS under consensus; approvals are keyed by signer pubkey (one each) and counted over a SORTED key view so the threshold check is deterministic on every node.",
-      "When approvals reach the threshold the contract EMITS the settlement step — the actual Xahau multisig Payment + the PROVEN agent_guardrail Hook come from generate_settlement (template: \"multisig_treasury\"); the contract never signs or moves value.",
+      "When approvals reach the threshold the contract EMITS the settlement step — the actual Xahau multisig Payment + the agent_guardrail Hook install/prove commands come from generate_settlement (template: \"multisig_treasury\"); the contract never signs or moves value.",
       "Ties the trifecta in: pair with an `xahc` guardrail Hook on the treasury account + an `xahc-prover` spend-limit/conservation proof — the ledger enforces the per-tx cap even if the off-chain approval logic is wrong.",
     ],
   },
@@ -419,8 +423,8 @@ export function generate(template: string, name = "mycontract"): FileSet {
       "client/client.js": CLIENT,
     },
     notes: [
-      `Scaffold with: hpdevkit gen nodejs blank-contract ${name}  (then replace src with these files), or drop these in directly.`,
-      "Run locally: npm install && npm start  (hpdevkit deploys to a local 3-node cluster).",
+      `Write these files into a new directory, or scaffold with \`hpdevkit gen nodejs starter-contract ${name}\` and replace its src/ with these.`,
+      "Run locally: npm install && npm start  (ncc bundles src/ into dist/, then hpdevkit deploys dist/ to a local dev cluster; needs Docker + hpdevkit).",
       ...t.notes,
       "Before deploy: run check_determinism on src/index.js — HIGH findings break consensus.",
     ],

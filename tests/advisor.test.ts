@@ -241,10 +241,26 @@ describe("deployCommands (all modes)", () => {
     expect(JSON.stringify(deployCommands({ mode: "single" }))).toMatch(/<HOST_XAHAU_ADDRESS>/);
   });
   it("cluster deploy reflects the requested node count", () => {
-    expect(JSON.stringify(deployCommands({ mode: "cluster", nodes: 5 }))).toMatch(/cluster create 5/);
+    expect(JSON.stringify(deployCommands({ mode: "cluster", nodes: 5 }))).toMatch(/cluster-create 5 /);
   });
   it("cluster deploy defaults to 3 nodes", () => {
-    expect(JSON.stringify(deployCommands({ mode: "cluster" }))).toMatch(/cluster create 3/);
+    expect(JSON.stringify(deployCommands({ mode: "cluster" }))).toMatch(/cluster-create 3 /);
+  });
+  // v0.6.0: pin the real evdevkit 0.7.22 CLI shape (commander definitions in its index.js).
+  // The old output used `cluster create` / `cluster deploy` / `cluster status` and a 3-arg
+  // `deploy ./dist ip:port pubkey`, none of which exist in evdevkit.
+  it("evdevkit commands match the real CLI (cluster-create, bundle, 3-arg deploy, both env vars)", () => {
+    const single = deployCommands({ mode: "single", host: "rH" })!.steps.join("\n");
+    const cluster = deployCommands({ mode: "cluster", nodes: 3 })!.steps.join("\n");
+    expect(single).toMatch(/EV_TENANT_SECRET=/);
+    expect(single).toMatch(/EV_USER_PRIVATE_KEY=/);
+    expect(single).toMatch(/evdevkit bundle <abs-path-to-dist> <instance-public-key> \/usr\/bin\/node -a index\.js/);
+    expect(single).toMatch(/evdevkit deploy <abs-path-to-bundle\.zip> <instance-ip> <user-port>/);
+    expect(cluster).toMatch(/evdevkit cluster-create 3 <abs-path-to-dist> \/usr\/bin\/node hosts\.txt/);
+    for (const s of [single, cluster]) {
+      expect(s).not.toMatch(/evdevkit cluster (create|deploy|status)/);
+      expect(s).not.toMatch(/<instance-ip>:<user-port>/);
+    }
   });
   it("cluster-manager connects, never replaces, the Offledger Cluster Manager", () => {
     const s = JSON.stringify(deployCommands({ mode: "cluster-manager" }));
