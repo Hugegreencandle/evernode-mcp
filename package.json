@@ -1,6 +1,6 @@
 {
   "name": "evernode-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "mcpName": "io.github.Hugegreencandle/evernode-mcp",
   "description": "Model Context Protocol (stdio) server for Evernode/HotPocket dApps: contract templates, a heuristic non-determinism linter, contract-API checks, EVR lease math, live host lookup via OnLedger, and deploy/settlement command generation. Advisory only: holds no keys, never signs or submits.",
   "type": "module",
@@ -54,13 +54,13 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "zod": "4.4.3"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
   },
   "devDependencies": {
+    "@types/node": "22.10.2",
     "typescript": "5.6.3",
-    "vitest": "2.1.8",
-    "@types/node": "22.10.2"
+    "vitest": "2.1.8"
   },
   "publishConfig": {
     "access": "public",

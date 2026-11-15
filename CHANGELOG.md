@@ -5,6 +5,21 @@ All notable changes to evernode-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-11-15
+
+### Changed
+- **Settlement notes: known limitation of `xahc prove --invariant guardrail`.** A soundness review
+  found that `prove_guardrail` has returned PROVEN on a stateful hook that skips its destination check
+  on a fresh account, and that it does not check transactions a hook emits. The settlement output now
+  says its PROVEN is reliable only for hooks that read no state and emit nothing (like the reference
+  `agent_guardrail`).
+
+### Security
+- Runtime dependencies updated: `@modelcontextprotocol/sdk` 1.29.0 → 1.32.2 (GHSA-22jm-h49p-29qw,
+  GHSA-46jr-4wx8-v453, GHSA-6prh-2h8m-c8cw, GHSA-6qxp-vccf-f47h, GHSA-f897-62hf-6gxq,
+  GHSA-rvq5-wwqv-78pq) and `zod` 4.4.3 → 4.6.7 (GHSA-mrhx-c7xc-m3w5). Lockfile refresh also picks up
+  `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828) and `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h) under express.
+
 ## [0.6.0] - 2026-10-01
 
 First npm release (`npx evernode-mcp`) and MCP Registry entry
