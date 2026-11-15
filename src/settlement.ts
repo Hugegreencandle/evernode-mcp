@@ -90,6 +90,7 @@ export function generateSettlement(opts: { template: string; limitDrops: number;
       "The Hook fires on Payment only: it does not stop the account's signers from removing it (SetHook) or moving value with other transaction types. Protect the signer quorum.",
       "Intended signing model: multisig/threshold across the cluster's signer nodes — never a single node. The generated settle.js signs with a single key as a placeholder; replace it with multisig aggregation. The contract only decides amounts; the Hook enforces the per-Payment cap at layer 1.",
       "Run the prove command on YOUR built wasm before deploy; deploy only on a PROVEN verdict.",
+      "Known limitation (2026-11-15): `prove_guardrail` has returned PROVEN on a stateful hook that skips its destination check on a fresh account, and it does not check transactions a hook emits. Its PROVEN is reliable only for hooks that read no state and emit nothing (like the reference agent_guardrail).",
     ],
   };
 }
